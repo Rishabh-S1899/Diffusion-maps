@@ -11,3 +11,5 @@ demo/**.png
 
 build
 dist
+*maps*
+logs
