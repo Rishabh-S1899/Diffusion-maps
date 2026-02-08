@@ -19,17 +19,38 @@ from .modules import *
 def hook_function(name, detach=True):
     def forward_hook(module, input, output):
         if hasattr(module.processor, "attn_map"):
-
             timestep = module.processor.timestep
-
+            
             attn_maps[timestep] = attn_maps.get(timestep, dict())
-            attn_maps[timestep][name] = module.processor.attn_map.cpu() if detach \
-                else module.processor.attn_map
+            attn_maps[timestep][name] = {
+                'map': module.processor.attn_map.cpu() if detach else module.processor.attn_map,
+                'similarity': getattr(module.processor, 'similarity', 0.0),
+                'entropy': getattr(module.processor, 'entropy', 0.0)
+            }
             
             del module.processor.attn_map
-
+    
     return forward_hook
 
+def save_attention_stats(attn_maps, base_dir='attn_stats'):
+    """Save only similarity and entropy statistics, not the full maps"""
+    import json
+    
+    os.makedirs(base_dir, exist_ok=True)
+    
+    stats = {}
+    for timestep, layers in attn_maps.items():
+        stats[timestep] = {}
+        for layer, data in layers.items():
+            stats[timestep][layer] = {
+                'similarity': data['similarity'],
+                'entropy': data['entropy']
+            }
+    
+    with open(os.path.join(base_dir, 'statistics.json'), 'w') as f:
+        json.dump(stats, f, indent=2)
+    
+    print(f"Statistics saved to {base_dir}/statistics.json")
 
 def register_cross_attention_hook(model, hook_function, target_name):
     for name, module in model.named_modules():

@@ -1998,6 +1998,111 @@ def lora_attn_call2_0(self, attn: Attention, hidden_states, height, width, *args
     return attn.processor(attn, hidden_states, height, width, *args, **kwargs)
 
 
+# def joint_attn_call2_0(
+#     self,
+#     attn: Attention,
+#     hidden_states: torch.FloatTensor,
+#     encoder_hidden_states: torch.FloatTensor = None,
+#     attention_mask: Optional[torch.FloatTensor] = None,
+#     ############################################################
+#     height: int = None,
+#     timestep: Optional[torch.Tensor] = None,
+#     ############################################################
+#     *args,
+#     **kwargs,
+# ) -> torch.FloatTensor:
+#     residual = hidden_states
+
+#     batch_size = hidden_states.shape[0]
+
+#     # `sample` projections.
+#     query = attn.to_q(hidden_states)
+#     key = attn.to_k(hidden_states)
+#     value = attn.to_v(hidden_states)
+
+#     inner_dim = key.shape[-1]
+#     head_dim = inner_dim // attn.heads
+
+#     query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+#     key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+#     value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+#     if attn.norm_q is not None:
+#         query = attn.norm_q(query)
+#     if attn.norm_k is not None:
+#         key = attn.norm_k(key)
+
+#     # `context` projections.
+#     if encoder_hidden_states is not None:
+#         encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
+#         encoder_hidden_states_key_proj = attn.add_k_proj(encoder_hidden_states)
+#         encoder_hidden_states_value_proj = attn.add_v_proj(encoder_hidden_states)
+
+#         encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+#             batch_size, -1, attn.heads, head_dim
+#         ).transpose(1, 2)
+#         encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+#             batch_size, -1, attn.heads, head_dim
+#         ).transpose(1, 2)
+#         encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+#             batch_size, -1, attn.heads, head_dim
+#         ).transpose(1, 2)
+
+#         if attn.norm_added_q is not None:
+#             encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
+#         if attn.norm_added_k is not None:
+#             encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
+
+#         query = torch.cat([query, encoder_hidden_states_query_proj], dim=2)
+#         key = torch.cat([key, encoder_hidden_states_key_proj], dim=2)
+#         value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
+
+#     ####################################################################################################
+#     if hasattr(self, "store_attn_map") and encoder_hidden_states is not None:
+#         hidden_states, attention_probs = scaled_dot_product_attention(
+#             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+#         )
+
+#         image_length = query.shape[2] - encoder_hidden_states_query_proj.shape[2]
+#         attention_probs_crop = attention_probs[:,:,:image_length,image_length:].cpu()
+#         # (4,24,4429,4429) -> (4,24,4096,333)
+#         attention_probs = attention_probs[:,:,:image_length,image_length:].cpu()
+        
+#         self.attn_map = rearrange(
+#             attention_probs,
+#             'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
+#             height = height
+#         ) # (4, 24, 4096, 333) -> (4, 24, height, width, 333)
+#         self.timestep = timestep[0].cpu().item() # TODO: int -> list
+#     else:
+#         hidden_states = F.scaled_dot_product_attention(
+#             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+#         )
+#     ####################################################################################################
+
+#     # hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
+#     hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+#     hidden_states = hidden_states.to(query.dtype)
+
+#     if encoder_hidden_states is not None:
+#         # Split the attention outputs.
+#         hidden_states, encoder_hidden_states = (
+#             hidden_states[:, : residual.shape[1]],
+#             hidden_states[:, residual.shape[1] :],
+#         )
+#         if not attn.context_pre_only:
+#             encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+#     # linear proj
+#     hidden_states = attn.to_out[0](hidden_states)
+#     # dropout
+#     hidden_states = attn.to_out[1](hidden_states)
+
+#     if encoder_hidden_states is not None:
+#         return hidden_states, encoder_hidden_states
+#     else:
+#         return hidden_states
+
 def joint_attn_call2_0(
     self,
     attn: Attention,
@@ -2064,23 +2169,46 @@ def joint_attn_call2_0(
         )
 
         image_length = query.shape[2] - encoder_hidden_states_query_proj.shape[2]
-
-        # (4,24,4429,4429) -> (4,24,4096,333)
-        attention_probs = attention_probs[:,:,:image_length,image_length:].cpu()
         
+        # Extract cross-attention: (batch, heads, image_tokens, text_tokens)
+        attention_probs_crop = attention_probs[:, :, :image_length, image_length:].cpu()
+        
+        # Compute similarity with previous timestep if it exists
+        if hasattr(self, 'prev_attn_map'):
+            similarity = F.cosine_similarity(
+                attention_probs_crop.flatten(1),  # Flatten to (batch, -1)
+                self.prev_attn_map.flatten(1),    # Flatten to (batch, -1)
+                dim=1
+            ).mean().item()  # Average across batch
+        else:
+            similarity = 0.0  # First timestep has no previous map
+        
+        # Compute entropy: H = -Σ(p * log(p))
+        # attention_probs_crop shape: (batch, heads, spatial, tokens)
+        # Compute entropy over token dimension (last dim)
+        entropy_per_token = -(attention_probs_crop * torch.log(attention_probs_crop + 1e-10)).sum(dim=-1)
+        # Average across batch, heads, and spatial dimensions
+        entropy = entropy_per_token.mean().item()
+        
+        # Store current map for next timestep's comparison
+        self.prev_attn_map = attention_probs_crop.clone()
+        
+        # Store everything needed for hook
         self.attn_map = rearrange(
-            attention_probs,
+            attention_probs_crop,
             'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
-            height = height
-        ) # (4, 24, 4096, 333) -> (4, 24, height, width, 333)
-        self.timestep = timestep[0].cpu().item() # TODO: int -> list
+            height=height
+        )  # (batch, heads, height, width, tokens)
+        self.timestep = timestep[0].cpu().item()
+        self.similarity = similarity
+        self.entropy = entropy
+        
     else:
         hidden_states = F.scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         )
     ####################################################################################################
 
-    # hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
     hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
     hidden_states = hidden_states.to(query.dtype)
 
@@ -2103,7 +2231,7 @@ def joint_attn_call2_0(
     else:
         return hidden_states
 
-
+    
 # FluxAttnProcessor2_0
 def flux_attn_call2_0(
     self,

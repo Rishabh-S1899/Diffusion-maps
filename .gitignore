@@ -13,3 +13,7 @@ build
 dist
 *maps*
 logs
+*.json
+*.png
+*.jpeg
+*.jpg
