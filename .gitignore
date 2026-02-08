@@ -17,3 +17,4 @@ logs
 *.png
 *.jpeg
 *.jpg
+*logs*
