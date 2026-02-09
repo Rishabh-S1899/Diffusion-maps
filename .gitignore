@@ -18,3 +18,4 @@ logs
 *.jpeg
 *.jpg
 *logs*
+*outputs*/

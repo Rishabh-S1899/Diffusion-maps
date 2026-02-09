@@ -50,7 +50,7 @@ def save_attention_stats(attn_maps, base_dir='attn_stats'):
     with open(os.path.join(base_dir, 'statistics.json'), 'w') as f:
         json.dump(stats, f, indent=2)
     
-    print(f"Statistics saved to {base_dir}/statistics.json")
+    # print(f"Statistics saved to {base_dir}/statistics.json")
 
 def register_cross_attention_hook(model, hook_function, target_name):
     for name, module in model.named_modules():
