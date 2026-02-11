@@ -11,20 +11,16 @@ sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (12, 8)
 
 # ==================== 1. LOAD DATA ====================
-def load_all_statistics(base_dir='outputs_parti-prompts'):
+def load_all_statistics(base_dir='outputs/parti-prompts'):
     """Load statistics from all prompt folders"""
     all_stats = []
     
     base_path = Path(base_dir)
     
-    # Debug: Check if directory exists
     if not base_path.exists():
         print(f"ERROR: Directory '{base_dir}' does not exist!")
-        print(f"Current working directory: {os.getcwd()}")
-        print(f"Please check your directory structure.")
         return []
     
-    # Look for statistics.json in subdirectories
     found_files = list(base_path.rglob('statistics.json'))
     print(f"Found {len(found_files)} statistics.json files")
     
@@ -33,14 +29,17 @@ def load_all_statistics(base_dir='outputs_parti-prompts'):
             with open(stats_file, 'r') as f:
                 data = json.load(f)
                 
-                # Get parent directory name as prompt identifier
                 prompt_name = stats_file.parent.parent.name
+                
+                # DEBUG: Check timesteps in raw data
+                num_timesteps = len(data.keys())
+                if num_timesteps != 15:
+                    print(f"  ⚠ {prompt_name}: only {num_timesteps} timesteps!")
                 
                 all_stats.append({
                     'prompt_name': prompt_name,
-                    'stats': data
+                    'stats': data  # Keep original structure with string keys
                 })
-                print(f"  ✓ Loaded: {prompt_name}")
         except Exception as e:
             print(f"  ✗ Error loading {stats_file}: {e}")
     
@@ -55,24 +54,23 @@ def aggregate_statistics(all_stats):
         print("ERROR: No statistics to aggregate!")
         return {}, {}
     
-    # Structure: {layer: {timestep: {'similarity': [values], 'entropy': [values]}}}
+    # Structure: {layer: {timestep_str: {'similarity': [values], 'entropy': [values]}}}
     aggregated = defaultdict(lambda: defaultdict(lambda: {'similarity': [], 'entropy': []}))
     
     for prompt_data in all_stats:
         stats = prompt_data['stats']
         for timestep_str, layers in stats.items():
-            timestep = float(timestep_str)  # Convert "1000.0" to 1000.0
+            # KEEP AS STRING - don't convert to float yet
             for layer_name, metrics in layers.items():
-                aggregated[layer_name][timestep]['similarity'].append(metrics['similarity'])
-                aggregated[layer_name][timestep]['entropy'].append(metrics['entropy'])
+                aggregated[layer_name][timestep_str]['similarity'].append(metrics['similarity'])
+                aggregated[layer_name][timestep_str]['entropy'].append(metrics['entropy'])
     
     # Compute summary statistics
     summary = {}
-    print(f"This is aggregated vals: {list(aggregated.items())[:10]}")  # Debug: show some layer keys
     for layer, timesteps in aggregated.items():
         summary[layer] = {}
-        for timestep, metrics in timesteps.items():
-            summary[layer][timestep] = {
+        for timestep_str, metrics in timesteps.items():
+            summary[layer][timestep_str] = {
                 'similarity_mean': np.mean(metrics['similarity']),
                 'similarity_std': np.std(metrics['similarity']),
                 'entropy_mean': np.mean(metrics['entropy']),
@@ -83,6 +81,65 @@ def aggregate_statistics(all_stats):
     return summary, aggregated
 
 # ==================== 3. VISUALIZATIONS ====================
+# ==================== 3. VISUALIZATIONS (FIXED) ====================
+def plot_similarity_heatmap(summary, output_dir='analysis'):
+    """Heatmap showing similarity across layers and timesteps"""
+    
+    if not summary:
+        print("⚠ Skipping similarity heatmap (no data)")
+        return
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 1. Get all unique timesteps from ALL layers (Robust fix)
+    all_timesteps = set()
+    for layer in summary:
+        all_timesteps.update(summary[layer].keys())
+    
+    # Sort timesteps descending (1000 -> 0)
+    timesteps = sorted(list(all_timesteps), key=lambda x: float(x), reverse=True)
+    
+    # Sort layers naturally
+    layers = sorted(summary.keys())
+    
+    print(f"Debug - Total unique timesteps found: {len(timesteps)}")
+    
+    # 2. Build matrix with NaN for missing values
+    similarity_matrix = np.full((len(layers), len(timesteps)), np.nan)
+    
+    for i, layer in enumerate(layers):
+        for j, t_str in enumerate(timesteps):
+            if t_str in summary[layer]:
+                similarity_matrix[i, j] = summary[layer][t_str]['similarity_mean']
+    
+    # Create labels
+    # formatting float labels to avoid long strings like '975.07861328125'
+    timestep_labels = [f"{float(t):.1f}" for t in timesteps]
+    
+    # Dynamic figure width
+    fig_width = max(16, len(timesteps) * 1.2)
+    plt.figure(figsize=(fig_width, 10))
+    
+    sns.heatmap(
+        similarity_matrix,
+        xticklabels=timestep_labels,
+        yticklabels=layers, # Use actual layer names
+        cmap='RdYlGn',
+        vmin=0, vmax=1,
+        annot=False,
+        cbar_kws={'label': 'Mean Similarity'}
+    )
+    
+    plt.xticks(rotation=45, ha='right')
+    plt.xlabel('Denoising Step (High=Noise → Low=Clean)', fontsize=12)
+    plt.ylabel('Layer', fontsize=12)
+    plt.title('Attention Map Similarity\n(Green = High Reuse Potential)', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/similarity_heatmap.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved similarity heatmap")
+
+
 def plot_entropy_heatmap(summary, output_dir='analysis'):
     """Heatmap showing entropy across layers and timesteps"""
     
@@ -92,34 +149,35 @@ def plot_entropy_heatmap(summary, output_dir='analysis'):
     
     os.makedirs(output_dir, exist_ok=True)
     
+    # 1. Robust Timestep Collection
+    all_timesteps = set()
+    for layer in summary:
+        all_timesteps.update(summary[layer].keys())
+    timesteps = sorted(list(all_timesteps), key=lambda x: float(x), reverse=True)
     layers = sorted(summary.keys())
-    timesteps = sorted(list(summary[layers[0]].keys()), reverse=True)  # Reverse: 1000 → 0
-    print(f"Thsi is layers {layers}")
-    print(f"This is timesteps {timesteps}")
-    entropy_matrix = np.zeros((len(layers), len(timesteps)))
-    for i, layer in enumerate(layers):
-        for j, timestep in enumerate(timesteps):
-            entropy_matrix[i, j] = summary[layer][timestep]['entropy_mean']
-    print(entropy_matrix)
-    # Create better labels
-    timestep_labels = [f"t{i}" for i in range(len(timesteps))]
     
-    # Make figure much wider for readability
-    fig_width = max(16, len(timesteps) * 1.2)  # Scale width based on number of timesteps
+    # 2. Build Matrix
+    entropy_matrix = np.full((len(layers), len(timesteps)), np.nan)
+    for i, layer in enumerate(layers):
+        for j, t_str in enumerate(timesteps):
+            if t_str in summary[layer]:
+                entropy_matrix[i, j] = summary[layer][t_str]['entropy_mean']
+    
+    timestep_labels = [f"{float(t):.1f}" for t in timesteps]
+    
+    fig_width = max(16, len(timesteps) * 1.2)
     plt.figure(figsize=(fig_width, 10))
     
     sns.heatmap(
         entropy_matrix,
         xticklabels=timestep_labels,
-        yticklabels=[f"L{i}" for i in range(len(layers))],
+        yticklabels=layers,
         cmap='YlOrRd',
         annot=False,
-        cbar_kws={'label': 'Mean Entropy'},
-        fmt='.2f'
+        cbar_kws={'label': 'Mean Entropy'}
     )
     
-    # Rotate x-axis labels and adjust spacing
-    plt.xticks(rotation=0, ha='center')
+    plt.xticks(rotation=45, ha='right')
     plt.xlabel('Denoising Step', fontsize=12)
     plt.ylabel('Layer', fontsize=12)
     plt.title('Attention Entropy\n(Red = Diffuse/High Entropy, Yellow = Focused/Low Entropy)', 
@@ -130,120 +188,94 @@ def plot_entropy_heatmap(summary, output_dir='analysis'):
     print(f"✓ Saved entropy heatmap")
 
 
-def plot_similarity_heatmap(summary, output_dir='analysis'):
-    """Heatmap showing similarity across layers and timesteps"""
-    
-    if not summary:
-        print("⚠ Skipping similarity heatmap (no data)")
-        return
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Get sorted layers and timesteps
-    layers = sorted(summary.keys())
-    timesteps = sorted(list(summary[layers[0]].keys()), reverse=True)  # Reverse: 1000 → 0
-    
-    # Build matrix
-    similarity_matrix = np.zeros((len(layers), len(timesteps)))
-    for i, layer in enumerate(layers):
-        for j, timestep in enumerate(timesteps):
-            similarity_matrix[i, j] = summary[layer][timestep]['similarity_mean']
-    
-    # Create better labels (show step number instead of float value)
-    timestep_labels = [f"t{i}" for i in range(len(timesteps))]  # t0, t1, t2...
-    
-    # Make figure much wider for readability
-    fig_width = max(16, len(timesteps) * 1.2)
-    plt.figure(figsize=(fig_width, 10))
-    
-    sns.heatmap(
-        similarity_matrix,
-        xticklabels=timestep_labels,  # Use step labels instead of float values
-        yticklabels=[f"L{i}" for i in range(len(layers))],
-        cmap='RdYlGn',
-        vmin=0, vmax=1,
-        annot=False,
-        cbar_kws={'label': 'Mean Similarity'},
-        fmt='.2f'
-    )
-    
-    # Adjust x-axis labels
-    plt.xticks(rotation=0, ha='center')
-    plt.xlabel('Denoising Step (t0=pure noise → t14=clean image)', fontsize=12)
-    plt.ylabel('Layer', fontsize=12)
-    plt.title('Attention Map Similarity\n(Green = High Reuse Potential)', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(f'{output_dir}/similarity_heatmap.png', dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"✓ Saved similarity heatmap")
-
-
 def plot_temporal_evolution(summary, output_dir='analysis'):
     """Line plots showing how similarity/entropy evolve across timesteps"""
     
     if not summary:
-        print("⚠ Skipping temporal evolution (no data)")
         return
     
     os.makedirs(output_dir, exist_ok=True)
-    
     layers = sorted(summary.keys())
-    timesteps = sorted(list(summary[layers[0]].keys()), reverse=True)  # Reverse
     
-    # Create step indices for x-axis (0, 1, 2... instead of 1000, 928, 857...)
+    # Robust Timestep Collection
+    all_timesteps = set()
+    for layer in summary:
+        all_timesteps.update(summary[layer].keys())
+    timesteps = sorted(list(all_timesteps), key=lambda x: float(x), reverse=True)
+    
     step_indices = list(range(len(timesteps)))
     
-    # Collect all entropies for adaptive threshold
+    # Collect entropies for threshold
     all_entropies = []
     for layer in layers:
-        for t in timesteps:
-            if summary[layer][t]['similarity_mean'] > 0:
-                all_entropies.append(summary[layer][t]['entropy_mean'])
-    high_entropy_threshold = np.percentile(all_entropies, 75)
+        for t_str in timesteps:
+            if t_str in summary[layer] and summary[layer][t_str]['similarity_mean'] > 0:
+                all_entropies.append(summary[layer][t_str]['entropy_mean'])
     
-    # Select representative layers
-    layer_indices = [0, len(layers)//3, 2*len(layers)//3, len(layers)-1]
-    selected_layers = [layers[i] for i in layer_indices]
+    high_entropy_threshold = np.percentile(all_entropies, 75) if all_entropies else 0
+    
+    # Select representative layers (First, Middle, Last)
+    if len(layers) > 4:
+        layer_indices = [0, len(layers)//3, 2*len(layers)//3, len(layers)-1]
+        selected_layers = [layers[i] for i in layer_indices]
+    else:
+        selected_layers = layers
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
     
     # Similarity evolution
     for layer in selected_layers:
-        sim_means = [summary[layer][t]['similarity_mean'] for t in timesteps]
-        sim_stds = [summary[layer][t]['similarity_std'] for t in timesteps]
+        sim_means = []
+        sim_stds = []
+        valid_indices = []
         
-        layer_num = layers.index(layer)
-        ax1.plot(step_indices, sim_means, marker='o', label=f'Layer {layer_num}', linewidth=2)
-        ax1.fill_between(step_indices,
-                         np.array(sim_means) - np.array(sim_stds),
-                         np.array(sim_means) + np.array(sim_stds),
-                         alpha=0.2)
+        for idx, t_str in enumerate(timesteps):
+            if t_str in summary[layer]:
+                sim_means.append(summary[layer][t_str]['similarity_mean'])
+                sim_stds.append(summary[layer][t_str]['similarity_std'])
+                valid_indices.append(idx)
+        
+        if valid_indices:
+            layer_short = layer.split('.')[-2] if '.' in layer else layer
+            ax1.plot(valid_indices, sim_means, marker='o', label=f'L{layer_short}', linewidth=2)
+            ax1.fill_between(valid_indices,
+                             np.array(sim_means) - np.array(sim_stds),
+                             np.array(sim_means) + np.array(sim_stds),
+                             alpha=0.2)
     
-    ax1.axhline(y=0.92, color='green', linestyle='--', alpha=0.5, label='High similarity threshold')
-    ax1.axhline(y=0.75, color='orange', linestyle='--', alpha=0.5, label='Medium similarity threshold')
-    ax1.set_xlabel('Denoising Step', fontsize=12)
-    ax1.set_ylabel('Similarity', fontsize=12)
-    ax1.set_title('Similarity Evolution Across Denoising (t0=pure noise → t14=clean)', fontsize=14, fontweight='bold')
+    ax1.set_xticks(step_indices)
+    ax1.set_xticklabels([f"{float(t):.0f}" for t in timesteps], rotation=45)
+    ax1.axhline(y=0.92, color='green', linestyle='--', alpha=0.5, label='Reuse Threshold')
+    ax1.set_ylabel('Similarity')
+    ax1.set_title('Similarity Evolution', fontsize=14, fontweight='bold')
     ax1.legend(loc='best')
     ax1.grid(True, alpha=0.3)
     
     # Entropy evolution
     for layer in selected_layers:
-        ent_means = [summary[layer][t]['entropy_mean'] for t in timesteps]
-        ent_stds = [summary[layer][t]['entropy_std'] for t in timesteps]
+        ent_means = []
+        ent_stds = []
+        valid_indices = []
         
-        layer_num = layers.index(layer)
-        ax2.plot(step_indices, ent_means, marker='o', label=f'Layer {layer_num}', linewidth=2)
-        ax2.fill_between(step_indices,
-                         np.array(ent_means) - np.array(ent_stds),
-                         np.array(ent_means) + np.array(ent_stds),
-                         alpha=0.2)
+        for idx, t_str in enumerate(timesteps):
+            if t_str in summary[layer]:
+                ent_means.append(summary[layer][t_str]['entropy_mean'])
+                ent_stds.append(summary[layer][t_str]['entropy_std'])
+                valid_indices.append(idx)
+
+        if valid_indices:
+            layer_short = layer.split('.')[-2] if '.' in layer else layer
+            ax2.plot(valid_indices, ent_means, marker='o', label=f'L{layer_short}', linewidth=2)
+            ax2.fill_between(valid_indices,
+                             np.array(ent_means) - np.array(ent_stds),
+                             np.array(ent_means) + np.array(ent_stds),
+                             alpha=0.2)
     
-    ax2.axhline(y=high_entropy_threshold, color='blue', linestyle='--', alpha=0.5, 
-                label=f'High entropy threshold ({high_entropy_threshold:.2f})')
-    ax2.set_xlabel('Denoising Step', fontsize=12)
-    ax2.set_ylabel('Entropy', fontsize=12)
-    ax2.set_title('Entropy Evolution Across Denoising', fontsize=14, fontweight='bold')
+    ax2.set_xticks(step_indices)
+    ax2.set_xticklabels([f"{float(t):.0f}" for t in timesteps], rotation=45)
+    ax2.axhline(y=high_entropy_threshold, color='blue', linestyle='--', alpha=0.5, label='High Entropy')
+    ax2.set_ylabel('Entropy')
+    ax2.set_title('Entropy Evolution', fontsize=14, fontweight='bold')
     ax2.legend(loc='best')
     ax2.grid(True, alpha=0.3)
     
@@ -264,13 +296,13 @@ def plot_optimization_scatter(summary, output_dir='analysis'):
     entropies = []
     timesteps_list = []
     
-    for layer, timesteps in summary.items():
-        for timestep, metrics in timesteps.items():
+    for layer, timesteps_dict in summary.items():
+        for timestep_str, metrics in timesteps_dict.items():
             if metrics['similarity_mean'] == 0.0:
                 continue
             similarities.append(metrics['similarity_mean'])
             entropies.append(metrics['entropy_mean'])
-            timesteps_list.append(timestep)
+            timesteps_list.append(float(timestep_str))  # CONVERT TO FLOAT HERE
     
     # Adaptive thresholds
     high_entropy_threshold = np.percentile(entropies, 75)
@@ -278,11 +310,11 @@ def plot_optimization_scatter(summary, output_dir='analysis'):
     
     plt.figure(figsize=(14, 10))
     scatter = plt.scatter(similarities, entropies,
-                         c=timesteps_list, cmap='viridis',
+                         c=timesteps_list, cmap='viridis',  # Now these are floats
                          alpha=0.5, s=30)
     plt.colorbar(scatter, label='Timestep')
     
-    # Decision boundaries (all strategies)
+    # Decision boundaries
     plt.axvline(x=0.92, color='green', linestyle='--', linewidth=2, label='High sim (0.92)')
     plt.axvline(x=0.75, color='orange', linestyle='--', linewidth=2, label='Med sim (0.75)')
     plt.axvline(x=0.60, color='brown', linestyle='--', linewidth=1.5, label='Low sim (0.60)')
@@ -291,32 +323,22 @@ def plot_optimization_scatter(summary, output_dir='analysis'):
     plt.axhline(y=medium_entropy_threshold, color='cyan', linestyle='--', linewidth=1.5,
                 label=f'Med ent ({medium_entropy_threshold:.2f})')
     
-    # Get axis limits for annotation placement
+    # Get axis limits
     y_min, y_max = plt.ylim()
-    x_min, x_max = plt.xlim()
     
     y_high = high_entropy_threshold + (y_max - high_entropy_threshold) * 0.4
     y_med = medium_entropy_threshold + (high_entropy_threshold - medium_entropy_threshold) * 0.5
     y_low = y_min + (medium_entropy_threshold - y_min) * 0.5
     
-    # Annotate regions (all 4 strategies)
-    # Top right: REUSE
+    # Annotate regions
     plt.text(0.96, y_high, 'REUSE\n(Str 2)', ha='center', fontsize=10, fontweight='bold',
              bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
-    
-    # Top middle-right: REUSE_SAFE
     plt.text(0.83, y_high, 'REUSE\nSAFE\n(Str 2)', ha='center', fontsize=9, fontweight='bold',
              bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.8))
-    
-    # Top left: SPARSIFY
     plt.text(0.68, y_high, 'SPARSIFY\n(Str 1)', ha='center', fontsize=9, fontweight='bold',
              bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-    
-    # Middle region: QUANTIZE
     plt.text(0.78, y_med, 'QUANTIZE\n(Str 3)', ha='center', fontsize=9, fontweight='bold',
              bbox=dict(boxstyle='round', facecolor='plum', alpha=0.8))
-    
-    # Bottom region: FULL_COMPUTE
     plt.text(0.70, y_low, 'FULL\nCOMPUTE\n(Str 4)', ha='center', fontsize=9, fontweight='bold',
              bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.8))
     
@@ -330,8 +352,6 @@ def plot_optimization_scatter(summary, output_dir='analysis'):
     plt.savefig(f'{output_dir}/optimization_scatter.png', dpi=300, bbox_inches='tight')
     plt.close()
     print(f"✓ Saved optimization scatter plot")
-
-
 # ==================== 4. QUANTITATIVE ANALYSIS ====================
 def count_optimization_opportunities(summary):
     """Calculate percentage of operations that can be optimized"""
@@ -496,20 +516,22 @@ if __name__ == '__main__':
     
     # Aggregate
     print("Aggregating statistics...")
+    # In main execution, after aggregation:
     summary, raw_data = aggregate_statistics(all_stats)
+
+    # DEBUG: Check what's in summary
+    print("\n=== DEBUG SUMMARY ===")
+    first_layer = list(summary.keys())[0]
+    print(f"First layer: {first_layer}")
+    print(f"Timesteps in summary: {list(summary[first_layer].keys())}")
+    print(f"Number of timesteps: {len(summary[first_layer].keys())}")
+    print("=" * 50 + "\n")
     
     # Save summary
+    # Save summary (summary already has string keys)
     os.makedirs('analysis', exist_ok=True)
     with open('analysis/summary_statistics.json', 'w') as f:
-        # Convert to serializable format
-        serializable = {
-            layer: {
-                str(timestep): metrics
-                for timestep, metrics in timesteps.items()
-            }
-            for layer, timesteps in summary.items()
-        }
-        json.dump(serializable, f, indent=2)
+        json.dump(summary, f, indent=2)
     print("✓ Saved summary statistics\n")
     
     # Generate visualizations
