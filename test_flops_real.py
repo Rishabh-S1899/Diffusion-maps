@@ -19,7 +19,7 @@ def test_flops_comparison():
     
     flop_counter.reset()
     with torch.no_grad():
-        pipe("a cat", num_inference_steps=2) # 2 steps to allow caching to trigger
+        pipe("a cat", num_inference_steps=15,guidance_scale=4.5) # 2 steps to allow caching to trigger
     
     baseline_flops = flop_counter.total_flops
     flop_counter.print_summary()
@@ -28,13 +28,13 @@ def test_flops_comparison():
     print("\n--- CACHED RUN (50% Layers Skipped) ---")
     # Generate a dummy schedule for 2nd step
     # Timesteps for 2 steps are usually [1000, 500] or similar
-    schedule = {"500": {f"transformer_blocks.{i}": True for i in range(0, 38, 2)}}
-    with open("temp_test_schedule.json", "w") as f:
-        json.dump(schedule, f)
+    # schedule = {"500": {f"transformer_blocks.{i}": True for i in range(0, 38, 2)}}
+    # with open("temp_test_schedule.json", "w") as f:
+    #     json.dump(schedule, f)
 
     # Re-init with schedule
     pipe = init_pipeline(pipe, collect_cross_attn=False, collect_self_attn=False, 
-                         cache_schedule_path="temp_test_schedule.json")
+                         cache_schedule_path="sample_cache_schedule.json")
     
     # Reset model state
     for _, module in pipe.transformer.named_modules():
@@ -42,7 +42,7 @@ def test_flops_comparison():
 
     flop_counter.reset()
     with torch.no_grad():
-        pipe("a cat", num_inference_steps=2)
+        pipe("a cat", num_inference_steps=15,guidance_scale=4.5)
     
     cached_flops = flop_counter.total_flops
     flop_counter.print_summary()
