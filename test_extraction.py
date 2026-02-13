@@ -74,8 +74,7 @@ def test_sd3_joint_extraction():
     print("SD3 Joint Extraction: SUCCESS")
 
 def test_flux_extraction():
-    print("
-Testing Flux Extraction Logic...")
+    print("Testing Flux Extraction Logic...")
     proc = MockProcessor()
     attn = MockAttention()
     
