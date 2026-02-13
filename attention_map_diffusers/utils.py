@@ -18,17 +18,21 @@ from .modules import *
 
 def hook_function(name, detach=True):
     def forward_hook(module, input, output):
-        if hasattr(module.processor, "attn_map"):
+        if hasattr(module.processor, "attn_map") or hasattr(module.processor, "self_attn_map"):
             timestep = module.processor.timestep
             
             attn_maps[timestep] = attn_maps.get(timestep, dict())
             attn_maps[timestep][name] = {
-                'map': module.processor.attn_map.cpu() if detach else module.processor.attn_map,
+                'map': getattr(module.processor, 'attn_map', torch.tensor(0.0)).cpu() if detach else getattr(module.processor, 'attn_map', None),
                 'similarity': getattr(module.processor, 'similarity', 0.0),
-                'entropy': getattr(module.processor, 'entropy', 0.0)
+                'entropy': getattr(module.processor, 'entropy', 0.0),
+                'self_map': getattr(module.processor, 'self_attn_map', torch.tensor(0.0)).cpu() if detach else getattr(module.processor, 'self_attn_map', None),
+                'self_similarity': getattr(module.processor, 'self_similarity', 0.0),
+                'self_entropy': getattr(module.processor, 'self_entropy', 0.0)
             }
             
-            del module.processor.attn_map
+            if hasattr(module.processor, 'attn_map'): del module.processor.attn_map
+            if hasattr(module.processor, 'self_attn_map'): del module.processor.self_attn_map
     
     return forward_hook
 
@@ -44,7 +48,9 @@ def save_attention_stats(attn_maps, base_dir='attn_stats'):
         for layer, data in layers.items():
             stats[timestep][layer] = {
                 'similarity': data['similarity'],
-                'entropy': data['entropy']
+                'entropy': data['entropy'],
+                'self_similarity': data.get('self_similarity', 0.0),
+                'self_entropy': data.get('self_entropy', 0.0)
             }
     
     with open(os.path.join(base_dir, 'statistics.json'), 'w') as f:
@@ -171,6 +177,7 @@ def init_pipeline(pipeline):
 
     else:
         if pipeline.unet.__class__.__name__ == 'UNet2DConditionModel':
+            pipeline.unet = register_cross_attention_hook(pipeline.unet, hook_function, 'attn1')
             pipeline.unet = register_cross_attention_hook(pipeline.unet, hook_function, 'attn2')
             pipeline.unet = replace_call_method_for_unet(pipeline.unet)
 

@@ -35,6 +35,8 @@ for i, prompt in enumerate(random_prompts):
         if hasattr(module, 'processor'):
             if hasattr(module.processor, 'prev_attn_map'):
                 delattr(module.processor, 'prev_attn_map')
+            if hasattr(module.processor, 'prev_self_attn_map'):
+                delattr(module.processor, 'prev_self_attn_map')
     ###############################################################
 
     # Run inference
