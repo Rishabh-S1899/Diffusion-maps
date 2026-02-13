@@ -1800,8 +1800,11 @@ def attn_call(
 
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         ####################################################################################################
-        if hasattr(self, "store_attn_map"):
-            is_cross = encoder_hidden_states is not None
+        collect_cross = getattr(self, "collect_cross_attn", False)
+        collect_self = getattr(self, "collect_self_attn", False)
+        is_cross = encoder_hidden_states is not None
+
+        if (collect_cross and is_cross) or (collect_self and not is_cross):
             attention_probs_cpu = attention_probs.cpu()
             
             if is_cross:
@@ -1940,9 +1943,11 @@ def attn_call2_0(
     # the output of sdp = (batch, num_heads, seq_len, head_dim)
     # TODO: add support for attn.scale when we move to Torch 2.1
     ####################################################################################################
-    if hasattr(self, "store_attn_map"):
-        is_cross = encoder_hidden_states is not None
-        
+    collect_cross = getattr(self, "collect_cross_attn", False)
+    collect_self = getattr(self, "collect_self_attn", False)
+    is_cross = encoder_hidden_states is not None
+
+    if (collect_cross and is_cross) or (collect_self and not is_cross):
         hidden_states, attention_probs = scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         )
@@ -2235,60 +2240,63 @@ def joint_attn_call2_0(
         value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
 
     ####################################################################################################
-    if hasattr(self, "store_attn_map") and encoder_hidden_states is not None:
+    collect_cross = getattr(self, "collect_cross_attn", False)
+    collect_self = getattr(self, "collect_self_attn", False)
+
+    if (collect_cross or collect_self) and encoder_hidden_states is not None:
         hidden_states, attention_probs = scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         )
 
         image_length = query.shape[2] - encoder_hidden_states_query_proj.shape[2]
         
-        # Extract cross-attention: (batch, heads, image_tokens, text_tokens)
-        attention_probs_cross = attention_probs[:, :, :image_length, image_length:].cpu()
-        # Extract self-attention: (batch, heads, image_tokens, image_tokens)
-        attention_probs_self = attention_probs[:, :, :image_length, :image_length].cpu()
-        
-        # Compute similarity and entropy for cross-attention
-        if hasattr(self, 'prev_attn_map'):
-            similarity = F.cosine_similarity(
-                attention_probs_cross.flatten(1),
-                self.prev_attn_map.flatten(1),
-                dim=1
-            ).mean().item()
-        else:
-            similarity = 0.0
-        
-        entropy = -(attention_probs_cross * torch.log(attention_probs_cross + 1e-10)).sum(dim=-1).mean().item()
-        self.prev_attn_map = attention_probs_cross.clone()
+        if collect_cross:
+            # Extract cross-attention: (batch, heads, image_tokens, text_tokens)
+            attention_probs_cross = attention_probs[:, :, :image_length, image_length:].cpu()
+            # Compute similarity and entropy for cross-attention
+            if hasattr(self, 'prev_attn_map'):
+                similarity = F.cosine_similarity(
+                    attention_probs_cross.flatten(1),
+                    self.prev_attn_map.flatten(1),
+                    dim=1
+                ).mean().item()
+            else:
+                similarity = 0.0
+            
+            entropy = -(attention_probs_cross * torch.log(attention_probs_cross + 1e-10)).sum(dim=-1).mean().item()
+            self.prev_attn_map = attention_probs_cross.clone()
+            self.attn_map = rearrange(
+                attention_probs_cross,
+                'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
+                height=height
+            )
+            self.similarity = similarity
+            self.entropy = entropy
 
-        # Compute similarity and entropy for self-attention
-        if hasattr(self, 'prev_self_attn_map'):
-            self_similarity = F.cosine_similarity(
-                attention_probs_self.flatten(1),
-                self.prev_self_attn_map.flatten(1),
-                dim=1
-            ).mean().item()
-        else:
-            self_similarity = 0.0
+        if collect_self:
+            # Extract self-attention: (batch, heads, image_tokens, image_tokens)
+            attention_probs_self = attention_probs[:, :, :image_length, :image_length].cpu()
+            # Compute similarity and entropy for self-attention
+            if hasattr(self, 'prev_self_attn_map'):
+                self_similarity = F.cosine_similarity(
+                    attention_probs_self.flatten(1),
+                    self.prev_self_attn_map.flatten(1),
+                    dim=1
+                ).mean().item()
+            else:
+                self_similarity = 0.0
+            
+            self_entropy = -(attention_probs_self * torch.log(attention_probs_self + 1e-10)).sum(dim=-1).mean().item()
+            self.prev_self_attn_map = attention_probs_self.clone()
+            self.self_attn_map = rearrange(
+                attention_probs_self,
+                'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
+                height=height
+            )
+            self.self_similarity = self_similarity
+            self.self_entropy = self_entropy
         
-        self_entropy = -(attention_probs_self * torch.log(attention_probs_self + 1e-10)).sum(dim=-1).mean().item()
-        self.prev_self_attn_map = attention_probs_self.clone()
-        
-        # Store everything needed for hook
-        self.attn_map = rearrange(
-            attention_probs_cross,
-            'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
-            height=height
-        )
-        self.self_attn_map = rearrange(
-            attention_probs_self,
-            'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
-            height=height
-        )
         self.timestep = int(timestep[0].cpu().item())
-        self.similarity = similarity
-        self.entropy = entropy
-        self.self_similarity = self_similarity
-        self.self_entropy = self_entropy
         
     else:
         hidden_states = F.scaled_dot_product_attention(
@@ -2386,60 +2394,63 @@ def flux_attn_call2_0(
         key = apply_rotary_emb(key, image_rotary_emb)
 
     ####################################################################################################
-    if hasattr(self, "store_attn_map") and encoder_hidden_states is not None:
+    collect_cross = getattr(self, "collect_cross_attn", False)
+    collect_self = getattr(self, "collect_self_attn", False)
+
+    if (collect_cross or collect_self) and encoder_hidden_states is not None:
         hidden_states, attention_probs = scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         )
 
         text_length = encoder_hidden_states_query_proj.shape[2]
 
-        # Extract cross-attention: (batch, heads, image_tokens, text_tokens)
-        attention_probs_cross = attention_probs[:, :, text_length:, :text_length].cpu()
-        # Extract self-attention: (batch, heads, image_tokens, image_tokens)
-        attention_probs_self = attention_probs[:, :, text_length:, text_length:].cpu()
-        
-        # Compute similarity and entropy for cross-attention
-        if hasattr(self, 'prev_attn_map'):
-            similarity = F.cosine_similarity(
-                attention_probs_cross.flatten(1),
-                self.prev_attn_map.flatten(1),
-                dim=1
-            ).mean().item()
-        else:
-            similarity = 0.0
-        
-        entropy = -(attention_probs_cross * torch.log(attention_probs_cross + 1e-10)).sum(dim=-1).mean().item()
-        self.prev_attn_map = attention_probs_cross.clone()
+        if collect_cross:
+            # Extract cross-attention: (batch, heads, image_tokens, text_tokens)
+            attention_probs_cross = attention_probs[:, :, text_length:, :text_length].cpu()
+            # Compute similarity and entropy for cross-attention
+            if hasattr(self, 'prev_attn_map'):
+                similarity = F.cosine_similarity(
+                    attention_probs_cross.flatten(1),
+                    self.prev_attn_map.flatten(1),
+                    dim=1
+                ).mean().item()
+            else:
+                similarity = 0.0
+            
+            entropy = -(attention_probs_cross * torch.log(attention_probs_cross + 1e-10)).sum(dim=-1).mean().item()
+            self.prev_attn_map = attention_probs_cross.clone()
+            self.attn_map = rearrange(
+                attention_probs_cross,
+                'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
+                height = height
+            )
+            self.similarity = similarity
+            self.entropy = entropy
 
-        # Compute similarity and entropy for self-attention
-        if hasattr(self, 'prev_self_attn_map'):
-            self_similarity = F.cosine_similarity(
-                attention_probs_self.flatten(1),
-                self.prev_self_attn_map.flatten(1),
-                dim=1
-            ).mean().item()
-        else:
-            self_similarity = 0.0
+        if collect_self:
+            # Extract self-attention: (batch, heads, image_tokens, image_tokens)
+            attention_probs_self = attention_probs[:, :, text_length:, text_length:].cpu()
+            # Compute similarity and entropy for self-attention
+            if hasattr(self, 'prev_self_attn_map'):
+                self_similarity = F.cosine_similarity(
+                    attention_probs_self.flatten(1),
+                    self.prev_self_attn_map.flatten(1),
+                    dim=1
+                ).mean().item()
+            else:
+                self_similarity = 0.0
+            
+            self_entropy = -(attention_probs_self * torch.log(attention_probs_self + 1e-10)).sum(dim=-1).mean().item()
+            self.prev_self_attn_map = attention_probs_self.clone()
+            self.self_attn_map = rearrange(
+                attention_probs_self,
+                'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
+                height = height
+            )
+            self.self_similarity = self_similarity
+            self.self_entropy = self_entropy
         
-        self_entropy = -(attention_probs_self * torch.log(attention_probs_self + 1e-10)).sum(dim=-1).mean().item()
-        self.prev_self_attn_map = attention_probs_self.clone()
-        
-        # Store everything needed for hook
-        self.attn_map = rearrange(
-            attention_probs_cross,
-            'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
-            height = height
-        )
-        self.self_attn_map = rearrange(
-            attention_probs_self,
-            'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
-            height = height
-        )
         self.timestep = int(timestep[0].cpu().item())
-        self.similarity = similarity
-        self.entropy = entropy
-        self.self_similarity = self_similarity
-        self.self_entropy = self_entropy
         
     else:
         hidden_states = F.scaled_dot_product_attention(

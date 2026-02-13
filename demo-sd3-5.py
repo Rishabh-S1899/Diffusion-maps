@@ -3,15 +3,24 @@ import os
 import sys
 import random
 import re
+import argparse
 from datasets import load_dataset
 from diffusers import StableDiffusion3Pipeline
 
 from attention_map_diffusers import attn_maps, init_pipeline
 from attention_map_diffusers.utils import save_attention_stats 
 
-# 1. Load and sample 200 random prompts
+# 0. Parse Arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--collect_cross", action="store_true", default=False, help="Collect cross-attention stats")
+parser.add_argument("--no_cross", action="store_false", dest="collect_cross", help="Disable cross-attention stats")
+parser.add_argument("--collect_self", action="store_true", default=False, help="Collect self-attention stats")
+parser.add_argument("--prompts", type=int, default=500, help="Number of prompts to process")
+args = parser.parse_args()
+
+# 1. Load and sample prompts
 ds = load_dataset("nateraw/parti-prompts", split="train")
-random_prompts = random.sample(ds['Prompt'], 500)
+random_prompts = random.sample(ds['Prompt'], args.prompts)
 
 # 2. Setup Pipeline
 pipe = StableDiffusion3Pipeline.from_pretrained(
@@ -19,16 +28,16 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
     torch_dtype=torch.bfloat16
 )
 pipe = pipe.to("cuda")
-pipe = init_pipeline(pipe)
+pipe = init_pipeline(pipe, collect_cross_attn=args.collect_cross, collect_self_attn=args.collect_self)
 
 # 3. Process and Save
 for i, prompt in enumerate(random_prompts):
-    print(f"Processing prompt {i+1}/500")
+    print(f"Processing prompt {i+1}/{args.prompts}")
     clean_prompt_snippet = re.sub(r'[^\w\s]', '', prompt[:20]).strip().replace(' ', '_')
     output_dir = f"outputs_parti-prompts/{clean_prompt_snippet}"
     
     os.makedirs(output_dir, exist_ok=True)
-
+    
     ###############################################################
     # CRITICAL: Clear prev_attn_map before each new prompt
     for name, module in pipe.transformer.named_modules():
@@ -38,7 +47,6 @@ for i, prompt in enumerate(random_prompts):
             if hasattr(module.processor, 'prev_self_attn_map'):
                 delattr(module.processor, 'prev_self_attn_map')
     ###############################################################
-
     # Run inference
     image = pipe(prompt, num_inference_steps=15, guidance_scale=4.5).images[0]
     

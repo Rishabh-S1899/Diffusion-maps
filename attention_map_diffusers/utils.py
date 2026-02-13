@@ -16,23 +16,32 @@ from diffusers.models.attention_processor import (
 from .modules import *
 
 
-def hook_function(name, detach=True):
+def hook_function(name, collect_cross=True, collect_self=True, detach=True):
     def forward_hook(module, input, output):
-        if hasattr(module.processor, "attn_map") or hasattr(module.processor, "self_attn_map"):
+        has_cross = hasattr(module.processor, "attn_map")
+        has_self = hasattr(module.processor, "self_attn_map")
+        
+        if (collect_cross and has_cross) or (collect_self and has_self):
             timestep = module.processor.timestep
             
             attn_maps[timestep] = attn_maps.get(timestep, dict())
-            attn_maps[timestep][name] = {
-                'map': getattr(module.processor, 'attn_map', torch.tensor(0.0)).cpu() if detach else getattr(module.processor, 'attn_map', None),
-                'similarity': getattr(module.processor, 'similarity', 0.0),
-                'entropy': getattr(module.processor, 'entropy', 0.0),
-                'self_map': getattr(module.processor, 'self_attn_map', torch.tensor(0.0)).cpu() if detach else getattr(module.processor, 'self_attn_map', None),
-                'self_similarity': getattr(module.processor, 'self_similarity', 0.0),
-                'self_entropy': getattr(module.processor, 'self_entropy', 0.0)
-            }
+            attn_maps[timestep][name] = {}
             
-            if hasattr(module.processor, 'attn_map'): del module.processor.attn_map
-            if hasattr(module.processor, 'self_attn_map'): del module.processor.self_attn_map
+            if collect_cross and has_cross:
+                attn_maps[timestep][name].update({
+                    'map': module.processor.attn_map.cpu() if detach else module.processor.attn_map,
+                    'similarity': getattr(module.processor, 'similarity', 0.0),
+                    'entropy': getattr(module.processor, 'entropy', 0.0)
+                })
+                del module.processor.attn_map
+                
+            if collect_self and has_self:
+                attn_maps[timestep][name].update({
+                    'self_map': module.processor.self_attn_map.cpu() if detach else module.processor.self_attn_map,
+                    'self_similarity': getattr(module.processor, 'self_similarity', 0.0),
+                    'self_entropy': getattr(module.processor, 'self_entropy', 0.0)
+                })
+                del module.processor.self_attn_map
     
     return forward_hook
 
@@ -46,37 +55,32 @@ def save_attention_stats(attn_maps, base_dir='attn_stats'):
     for timestep, layers in attn_maps.items():
         stats[timestep] = {}
         for layer, data in layers.items():
-            stats[timestep][layer] = {
-                'similarity': data['similarity'],
-                'entropy': data['entropy'],
-                'self_similarity': data.get('self_similarity', 0.0),
-                'self_entropy': data.get('self_entropy', 0.0)
-            }
+            stats[timestep][layer] = {}
+            if 'similarity' in data:
+                stats[timestep][layer].update({
+                    'similarity': data['similarity'],
+                    'entropy': data['entropy']
+                })
+            if 'self_similarity' in data:
+                stats[timestep][layer].update({
+                    'self_similarity': data['self_similarity'],
+                    'self_entropy': data['self_entropy']
+                })
     
     with open(os.path.join(base_dir, 'statistics.json'), 'w') as f:
         json.dump(stats, f, indent=2)
     
     # print(f"Statistics saved to {base_dir}/statistics.json")
 
-def register_cross_attention_hook(model, hook_function, target_name):
+def register_cross_attention_hook(model, hook_function, target_name, collect_cross=True, collect_self=True):
     for name, module in model.named_modules():
         if not name.endswith(target_name):
             continue
 
-        if isinstance(module.processor, AttnProcessor):
-            module.processor.store_attn_map = True
-        elif isinstance(module.processor, AttnProcessor2_0):
-            module.processor.store_attn_map = True
-        elif isinstance(module.processor, LoRAAttnProcessor):
-            module.processor.store_attn_map = True
-        elif isinstance(module.processor, LoRAAttnProcessor2_0):
-            module.processor.store_attn_map = True
-        elif isinstance(module.processor, JointAttnProcessor2_0):
-            module.processor.store_attn_map = True
-        elif isinstance(module.processor, FluxAttnProcessor2_0):
-            module.processor.store_attn_map = True
+        module.processor.collect_cross_attn = collect_cross
+        module.processor.collect_self_attn = collect_self
 
-        hook = module.register_forward_hook(hook_function(name))
+        hook = module.register_forward_hook(hook_function(name, collect_cross=collect_cross, collect_self=collect_self))
     
     return model
 
@@ -150,7 +154,7 @@ def replace_call_method_for_flux(model):
     return model
 
 
-def init_pipeline(pipeline):
+def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True):
     AttnProcessor.__call__ = attn_call
     AttnProcessor2_0.__call__ = attn_call2_0
     LoRAAttnProcessor.__call__ = lora_attn_call
@@ -158,14 +162,18 @@ def init_pipeline(pipeline):
     if 'transformer' in vars(pipeline).keys():
         if pipeline.transformer.__class__.__name__ == 'SD3Transformer2DModel':
             JointAttnProcessor2_0.__call__ = joint_attn_call2_0
-            pipeline.transformer = register_cross_attention_hook(pipeline.transformer, hook_function, 'attn')
+            pipeline.transformer = register_cross_attention_hook(pipeline.transformer, hook_function, 'attn',
+                                                               collect_cross=collect_cross_attn,
+                                                               collect_self=collect_self_attn)
             pipeline.transformer = replace_call_method_for_sd3(pipeline.transformer)
         
         elif pipeline.transformer.__class__.__name__ == 'FluxTransformer2DModel':
             from diffusers import FluxPipeline
             FluxAttnProcessor2_0.__call__ = flux_attn_call2_0
             FluxPipeline.__call__ = FluxPipeline_call
-            pipeline.transformer = register_cross_attention_hook(pipeline.transformer, hook_function, 'attn')
+            pipeline.transformer = register_cross_attention_hook(pipeline.transformer, hook_function, 'attn',
+                                                               collect_cross=collect_cross_attn,
+                                                               collect_self=collect_self_attn)
             pipeline.transformer = replace_call_method_for_flux(pipeline.transformer)
 
         # TODO: implement
@@ -177,8 +185,10 @@ def init_pipeline(pipeline):
 
     else:
         if pipeline.unet.__class__.__name__ == 'UNet2DConditionModel':
-            pipeline.unet = register_cross_attention_hook(pipeline.unet, hook_function, 'attn1')
-            pipeline.unet = register_cross_attention_hook(pipeline.unet, hook_function, 'attn2')
+            pipeline.unet = register_cross_attention_hook(pipeline.unet, hook_function, 'attn1',
+                                                         collect_cross=False, collect_self=collect_self_attn)
+            pipeline.unet = register_cross_attention_hook(pipeline.unet, hook_function, 'attn2',
+                                                         collect_cross=collect_cross_attn, collect_self=False)
             pipeline.unet = replace_call_method_for_unet(pipeline.unet)
 
 
