@@ -16,6 +16,7 @@ class MockAttention:
         self.norm_k = None
         self.norm_added_q = None
         self.norm_added_k = None
+        self.context_pre_only = False
         
     def to_q(self, x): return x
     def to_k(self, x): return x
@@ -23,6 +24,7 @@ class MockAttention:
     def add_q_proj(self, x): return x
     def add_k_proj(self, x): return x
     def add_v_proj(self, x): return x
+    def to_add_out(self, x): return x
 
 def verify():
     print("Starting verification of self-attention implementation...")
@@ -39,8 +41,7 @@ def verify():
     head_dim = 8
     
     # Simulate Timestep 1
-    print("
-Simulating Timestep 1...")
+    print("Simulating Timestep 1...")
     hidden_states = torch.randn(batch_size, 16, attn.heads * head_dim)
     encoder_hidden_states = torch.randn(batch_size, 4, attn.heads * head_dim)
     timestep = torch.tensor([1000.0])
@@ -60,8 +61,7 @@ Simulating Timestep 1...")
     assert processor.self_similarity == 0.0, "First timestep self-similarity should be 0.0"
     
     # Simulate Timestep 2 (slightly changed data)
-    print("
-Simulating Timestep 2...")
+    print("Simulating Timestep 2...")
     hidden_states_2 = hidden_states + 0.1 * torch.randn_like(hidden_states)
     timestep_2 = torch.tensor([980.0])
     
@@ -75,8 +75,7 @@ Simulating Timestep 2...")
     assert processor.self_similarity > 0.0, "Self-similarity should now be > 0"
     
     # Test Hook and Stats Saving
-    print("
-Testing Hook and Stats Saving...")
+    print("Testing Hook and Stats Saving...")
     class MockModule:
         def __init__(self, p): self.processor = p
     
@@ -90,16 +89,14 @@ Testing Hook and Stats Saving...")
     
     with open('test_verify_output/statistics.json', 'r') as f:
         stats = json.load(f)
-        print("
-Generated JSON sample (Timestep 980):")
+        print("Generated JSON sample (Timestep 980):")
         print(json.dumps(stats["980"]["test_layer"], indent=2))
         
         layer_stats = stats["980"]["test_layer"]
         assert 'self_similarity' in layer_stats
         assert 'self_entropy' in layer_stats
 
-    print("
-Verification SUCCESSFUL!")
+    print("Verification SUCCESSFUL!")
 
 if __name__ == "__main__":
     verify()
