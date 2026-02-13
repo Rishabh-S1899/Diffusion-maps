@@ -2284,7 +2284,7 @@ def joint_attn_call2_0(
             'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
             height=height
         )
-        self.timestep = timestep[0].cpu().item()
+        self.timestep = int(timestep[0].cpu().item())
         self.similarity = similarity
         self.entropy = entropy
         self.self_similarity = self_similarity
@@ -2435,7 +2435,7 @@ def flux_attn_call2_0(
             'batch attn_head (height width) attn_dim -> batch attn_head height width attn_dim',
             height = height
         )
-        self.timestep = timestep[0].cpu().item()
+        self.timestep = int(timestep[0].cpu().item())
         self.similarity = similarity
         self.entropy = entropy
         self.self_similarity = self_similarity

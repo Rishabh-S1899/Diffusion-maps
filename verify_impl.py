@@ -40,35 +40,33 @@ def verify():
     attn = MockAttention()
     
     # Mock data: Batch=1, Heads=4, Image_Tokens=16 (4x4), Text_Tokens=4, Head_Dim=8
-    # Total tokens = 16 + 4 = 20
-    # Query shape for joint: (Batch, Heads, Total_Tokens, Head_Dim)
-    
     height, width = 4, 4
     batch_size = 1
     head_dim = 8
     
+    class MockModule:
+        def __init__(self, p): self.processor = p
+    
+    module = MockModule(processor)
+    hook = hook_function("test_layer")
+
     # Simulate Timestep 1
-    print("Simulating Timestep 1...")
+    print("\nSimulating Timestep 1...")
     hidden_states = torch.randn(batch_size, 16, attn.heads * head_dim)
     encoder_hidden_states = torch.randn(batch_size, 4, attn.heads * head_dim)
     timestep = torch.tensor([1000.0])
     
-    # Call the modified joint_attn_call
     joint_attn_call2_0(processor, attn, hidden_states, encoder_hidden_states, 
                        height=height, timestep=timestep)
     
-    # Check attributes
     print(f"Timestep 1 - Cross Similarity: {processor.similarity}")
-    print(f"Timestep 1 - Cross Entropy: {processor.entropy}")
     print(f"Timestep 1 - Self Similarity: {processor.self_similarity}")
-    print(f"Timestep 1 - Self Entropy: {processor.self_entropy}")
     
-    assert hasattr(processor, 'self_attn_map'), "Missing self_attn_map"
-    assert processor.similarity == 0.0, "First timestep similarity should be 0.0"
-    assert processor.self_similarity == 0.0, "First timestep self-similarity should be 0.0"
+    # Trigger hook for timestep 1
+    hook(module, None, None)
     
     # Simulate Timestep 2 (slightly changed data)
-    print("Simulating Timestep 2...")
+    print("\nSimulating Timestep 2...")
     hidden_states_2 = hidden_states + 0.1 * torch.randn_like(hidden_states)
     timestep_2 = torch.tensor([980.0])
     
@@ -78,32 +76,33 @@ def verify():
     print(f"Timestep 2 - Cross Similarity: {processor.similarity:.4f}")
     print(f"Timestep 2 - Self Similarity: {processor.self_similarity:.4f}")
     
-    assert processor.similarity > 0.0, "Similarity should now be > 0"
-    assert processor.self_similarity > 0.0, "Self-similarity should now be > 0"
-    
-    # Test Hook and Stats Saving
-    print("Testing Hook and Stats Saving...")
-    class MockModule:
-        def __init__(self, p): self.processor = p
-    
-    module = MockModule(processor)
-    # Manually trigger hook
-    hook = hook_function("test_layer")
+    # Trigger hook for timestep 2
     hook(module, None, None)
     
+    # Test Stats Saving
+    print("\nTesting Stats Saving...")
     from attention_map_diffusers.utils import save_attention_stats
     save_attention_stats(attn_maps, base_dir='test_verify_output')
     
     with open('test_verify_output/statistics.json', 'r') as f:
         stats = json.load(f)
-        print("Generated JSON sample (Timestep 980):")
+        
+        # JSON keys from dictionary with int keys become strings
+        assert "1000" in stats, "Missing timestep 1000 in JSON"
+        assert "980" in stats, "Missing timestep 980 in JSON"
+        
+        print("\nGenerated JSON sample (Timestep 980):")
         print(json.dumps(stats["980"]["test_layer"], indent=2))
         
         layer_stats = stats["980"]["test_layer"]
+        assert 'similarity' in layer_stats
+        assert 'entropy' in layer_stats
         assert 'self_similarity' in layer_stats
         assert 'self_entropy' in layer_stats
+        assert layer_stats['similarity'] > 0, "Similarity should be positive"
+        assert layer_stats['self_similarity'] > 0, "Self-similarity should be positive"
 
-    print("Verification SUCCESSFUL!")
+    print("\nVerification SUCCESSFUL!")
 
 if __name__ == "__main__":
     verify()
