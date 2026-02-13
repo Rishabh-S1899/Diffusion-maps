@@ -1,5 +1,5 @@
 import os
-
+import json
 import torch
 import torch.nn.functional as F
 from torchvision.transforms import ToPILImage
@@ -15,6 +15,16 @@ from diffusers.models.attention_processor import (
 
 from .modules import *
 
+cache_schedule = {}
+
+def load_cache_schedule(path):
+    global cache_schedule
+    if path and os.path.exists(path):
+        with open(path, 'r') as f:
+            cache_schedule = json.load(f)
+        print(f"Loaded cache schedule from {path}")
+    else:
+        cache_schedule = {}
 
 class FLOPCounter:
     def __init__(self):
@@ -124,8 +134,6 @@ def save_attention_stats(attn_maps, base_dir='attn_stats'):
     
     with open(os.path.join(base_dir, 'statistics.json'), 'w') as f:
         json.dump(stats, f, indent=2)
-    
-    # print(f"Statistics saved to {base_dir}/statistics.json")
 
 def register_cross_attention_hook(model, hook_function, target_name, collect_cross=True, collect_self=True):
     for name, module in model.named_modules():
@@ -145,36 +153,17 @@ def replace_call_method_for_unet(model):
         from diffusers.models.unets import UNet2DConditionModel
         model.forward = UNet2DConditionModelForward.__get__(model, UNet2DConditionModel)
 
-    for name, layer in model.named_children():
-        
+    for name, layer in model.named_modules():
         if layer.__class__.__name__ == 'Transformer2DModel':
             from diffusers.models import Transformer2DModel
             layer.forward = Transformer2DModelForward.__get__(layer, Transformer2DModel)
         
         elif layer.__class__.__name__ == 'BasicTransformerBlock':
             from diffusers.models.attention import BasicTransformerBlock
+            layer.layer_name = name
             layer.forward = BasicTransformerBlockForward.__get__(layer, BasicTransformerBlock)
-        
-        replace_call_method_for_unet(layer)
     
     return model
-
-
-# TODO: implement
-# def replace_call_method_for_sana(model):
-#     if model.__class__.__name__ == 'SanaTransformer2DModel':
-#         from diffusers.models.transformers import SanaTransformer2DModel
-#         model.forward = SanaTransformer2DModelForward.__get__(model, SanaTransformer2DModel)
-
-#     for name, layer in model.named_children():
-        
-#         if layer.__class__.__name__ == 'SanaTransformerBlock':
-#             from diffusers.models.transformers.sana_transformer import SanaTransformerBlock
-#             layer.forward = SanaTransformerBlockForward.__get__(layer, SanaTransformerBlock)
-        
-#         replace_call_method_for_sana(layer)
-    
-#     return model
 
 
 def replace_call_method_for_sd3(model):
@@ -182,14 +171,12 @@ def replace_call_method_for_sd3(model):
         from diffusers.models.transformers import SD3Transformer2DModel
         model.forward = SD3Transformer2DModelForward.__get__(model, SD3Transformer2DModel)
 
-    for name, layer in model.named_children():
-        
+    for name, layer in model.named_modules():
         if layer.__class__.__name__ == 'JointTransformerBlock':
+            layer.layer_name = name
             from diffusers.models.attention import JointTransformerBlock
             layer.forward = JointTransformerBlockForward.__get__(layer, JointTransformerBlock)
         
-        replace_call_method_for_sd3(layer)
-    
     return model
 
 
@@ -198,18 +185,19 @@ def replace_call_method_for_flux(model):
         from diffusers.models.transformers import FluxTransformer2DModel
         model.forward = FluxTransformer2DModelForward.__get__(model, FluxTransformer2DModel)
 
-    for name, layer in model.named_children():
-        
+    for name, layer in model.named_modules():
         if layer.__class__.__name__ == 'FluxTransformerBlock':
+            layer.layer_name = name
             from diffusers.models.transformers.transformer_flux import FluxTransformerBlock
             layer.forward = FluxTransformerBlockForward.__get__(layer, FluxTransformerBlock)
         
-        replace_call_method_for_flux(layer)
-    
     return model
 
 
-def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True):
+def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True, cache_schedule_path=None):
+    if cache_schedule_path:
+        load_cache_schedule(cache_schedule_path)
+
     AttnProcessor.__call__ = attn_call
     AttnProcessor2_0.__call__ = attn_call2_0
     LoRAAttnProcessor.__call__ = lora_attn_call
@@ -231,13 +219,6 @@ def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True):
                                                                collect_self=collect_self_attn)
             pipeline.transformer = replace_call_method_for_flux(pipeline.transformer)
 
-        # TODO: implement
-        # elif pipeline.transformer.__class__.__name__ == 'SanaTransformer2DModel':
-        #     from diffusers import SanaPipeline
-        #     SanaPipeline.__call__ == SanaPipeline_call
-        #     pipeline.transformer = register_cross_attention_hook(pipeline.transformer, hook_function, 'attn2')
-        #     pipeline.transformer = replace_call_method_for_sana(pipeline.transformer)
-
     else:
         if pipeline.unet.__class__.__name__ == 'UNet2DConditionModel':
             pipeline.unet = register_cross_attention_hook(pipeline.unet, hook_function, 'attn1',
@@ -248,7 +229,6 @@ def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True):
 
 
     return pipeline
-
 
 def process_token(token, startofword):
     if '</w>' in token:

@@ -17,6 +17,7 @@ parser.add_argument("--no_cross", action="store_false", dest="collect_cross", he
 parser.add_argument("--collect_self", action="store_true", default=False, help="Collect self-attention stats")
 parser.add_argument("--prompts", type=int, default=500, help="Number of prompts to process")
 parser.add_argument("--profile", action="store_true", help="Profile FLOPs")
+parser.add_argument("--cache_schedule", type=str, default=None, help="Path to cache schedule JSON")
 args = parser.parse_args()
 
 # 1. Load and sample prompts
@@ -29,7 +30,8 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
     torch_dtype=torch.bfloat16
 )
 pipe = pipe.to("cuda")
-pipe = init_pipeline(pipe, collect_cross_attn=args.collect_cross, collect_self_attn=args.collect_self)
+pipe = init_pipeline(pipe, collect_cross_attn=args.collect_cross, collect_self_attn=args.collect_self, 
+                     cache_schedule_path=args.cache_schedule)
 
 if args.profile:
     from attention_map_diffusers.utils import register_flops_hook, flop_counter

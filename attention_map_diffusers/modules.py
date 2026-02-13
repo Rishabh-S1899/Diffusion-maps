@@ -1593,13 +1593,29 @@ def JointTransformerBlockForward(
             encoder_hidden_states, emb=temb
         )
 
-    # Attention.
-    attn_output, context_attn_output = self.attn(
-        hidden_states=norm_hidden_states, encoder_hidden_states=norm_encoder_hidden_states,
-        ############################################################
-        timestep=timestep, height=height,
-        ############################################################
-    )
+    # Logic for caching
+    ts_val = str(int(timestep[0].item())) if timestep is not None else None
+    layer_name = getattr(self, "layer_name", None)
+    
+    use_cache = False
+    if ts_val and layer_name:
+        from .utils import cache_schedule
+        use_cache = cache_schedule.get(ts_val, {}).get(layer_name, False)
+        
+    if use_cache and hasattr(self, "prev_attn_output"):
+        attn_output = self.prev_attn_output
+        context_attn_output = self.prev_context_attn_output
+    else:
+        # Attention.
+        attn_output, context_attn_output = self.attn(
+            hidden_states=norm_hidden_states, encoder_hidden_states=norm_encoder_hidden_states,
+            ############################################################
+            timestep=timestep, height=height,
+            ############################################################
+        )
+        if ts_val and layer_name:
+            self.prev_attn_output = attn_output
+            self.prev_context_attn_output = context_attn_output
 
     # Process attention outputs for the `hidden_states`.
     attn_output = gate_msa.unsqueeze(1) * attn_output
@@ -1661,16 +1677,33 @@ def FluxTransformerBlockForward(
         encoder_hidden_states, emb=temb
     )
     joint_attention_kwargs = joint_attention_kwargs or {}
-    # Attention.
-    attn_output, context_attn_output = self.attn(
-        hidden_states=norm_hidden_states,
-        encoder_hidden_states=norm_encoder_hidden_states,
-        image_rotary_emb=image_rotary_emb,
-        ############################################################
-        timestep=timestep, height=height,
-        ############################################################
-        **joint_attention_kwargs,
-    )
+    
+    # Logic for caching
+    ts_val = str(int(timestep[0].item())) if timestep is not None else None
+    layer_name = getattr(self, "layer_name", None)
+    
+    use_cache = False
+    if ts_val and layer_name:
+        from .utils import cache_schedule
+        use_cache = cache_schedule.get(ts_val, {}).get(layer_name, False)
+
+    if use_cache and hasattr(self, "prev_attn_output"):
+        attn_output = self.prev_attn_output
+        context_attn_output = self.prev_context_attn_output
+    else:
+        # Attention.
+        attn_output, context_attn_output = self.attn(
+            hidden_states=norm_hidden_states,
+            encoder_hidden_states=norm_encoder_hidden_states,
+            image_rotary_emb=image_rotary_emb,
+            ############################################################
+            timestep=timestep, height=height,
+            ############################################################
+            **joint_attention_kwargs,
+        )
+        if ts_val and layer_name:
+            self.prev_attn_output = attn_output
+            self.prev_context_attn_output = context_attn_output
 
     # Process attention outputs for the `hidden_states`.
     attn_output = gate_msa.unsqueeze(1) * attn_output
