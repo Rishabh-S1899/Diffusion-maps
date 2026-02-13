@@ -17,6 +17,12 @@ class MockAttention:
         self.norm_added_q = None
         self.norm_added_k = None
         self.context_pre_only = False
+        self.to_out = [lambda x: x, lambda x: x]
+        self.spatial_norm = None
+        self.group_norm = None
+        self.norm_cross = False
+        self.residual_connection = True
+        self.rescale_output_factor = 1.0
         
     def to_q(self, x): return x
     def to_k(self, x): return x
@@ -25,6 +31,7 @@ class MockAttention:
     def add_k_proj(self, x): return x
     def add_v_proj(self, x): return x
     def to_add_out(self, x): return x
+    def prepare_attention_mask(self, mask, seq_len, batch_size): return mask
 
 def verify():
     print("Starting verification of self-attention implementation...")
