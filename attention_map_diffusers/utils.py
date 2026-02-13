@@ -51,25 +51,17 @@ flop_counter = FLOPCounter()
 def register_flops_hook(model):
     def linear_hook(name):
         def hook(module, input, output):
-            # FLOPs = 2 * in_features * out_features * batch_size
-            # Simplified: out_elements * 2 * in_features
-            batch_size = input[0].size(0)
-            in_features = module.in_features
-            out_features = module.out_features
-            # output shape is usually (batch, ..., out_features)
-            num_out_elements = output.numel() // out_features
-            flops = batch_size * num_out_elements * (2 * in_features - 1) * out_features
+            # FLOPs = output_elements * (2 * in_features - 1)
+            # This correctly handles batch_size and sequence_length via output.numel()
+            flops = output.numel() * (2 * module.in_features - 1)
             flop_counter.add_flops(name, flops)
         return hook
 
     def conv_hook(name):
         def hook(module, input, output):
-            # FLOPs = 2 * k_h * k_w * in_channels * out_channels * out_h * out_w / groups
-            batch_size = output.size(0)
-            out_channels = module.out_channels
-            out_h, out_w = output.size(2), output.size(3)
+            # FLOPs = output_elements * (2 * kernel_ops - 1)
             kernel_ops = module.kernel_size[0] * module.kernel_size[1] * (module.in_channels // module.groups)
-            flops = batch_size * out_channels * out_h * out_w * (2 * kernel_ops - 1)
+            flops = output.numel() * (2 * kernel_ops - 1)
             flop_counter.add_flops(name, flops)
         return hook
 

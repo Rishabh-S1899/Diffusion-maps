@@ -49,13 +49,20 @@ for i, prompt in enumerate(random_prompts):
         flop_counter.reset()
     
     ###############################################################
-    # CRITICAL: Clear prev_attn_map before each new prompt
+    # CRITICAL: Clear prev_attn_map and cache before each new prompt
     for name, module in pipe.transformer.named_modules():
+        # Clear attention stats cache
         if hasattr(module, 'processor'):
             if hasattr(module.processor, 'prev_attn_map'):
                 delattr(module.processor, 'prev_attn_map')
             if hasattr(module.processor, 'prev_self_attn_map'):
                 delattr(module.processor, 'prev_self_attn_map')
+        
+        # Clear attention output cache (on the blocks)
+        if hasattr(module, 'prev_attn_output'):
+            delattr(module, 'prev_attn_output')
+        if hasattr(module, 'prev_context_attn_output'):
+            delattr(module, 'prev_context_attn_output')
     ###############################################################
     # Run inference
     image = pipe(prompt, num_inference_steps=15, guidance_scale=4.5).images[0]
