@@ -16,6 +16,61 @@ from diffusers.models.attention_processor import (
 from .modules import *
 
 
+class FLOPCounter:
+    def __init__(self):
+        self.reset()
+        
+    def reset(self):
+        self.total_flops = 0
+        self.layer_flops = {}
+        
+    def add_flops(self, name, count):
+        self.total_flops += count
+        self.layer_flops[name] = self.layer_flops.get(name, 0) + count
+
+    def print_summary(self):
+        print("\n" + "="*50)
+        print("FLOPs Summary")
+        print("-" * 50)
+        print(f"Total FLOPs: {self.total_flops:,}")
+        print(f"Total GFLOPs: {self.total_flops / 1e9:.4f}")
+        print("="*50 + "\n")
+
+flop_counter = FLOPCounter()
+
+def register_flops_hook(model):
+    def linear_hook(name):
+        def hook(module, input, output):
+            # FLOPs = 2 * in_features * out_features * batch_size
+            # Simplified: out_elements * 2 * in_features
+            batch_size = input[0].size(0)
+            in_features = module.in_features
+            out_features = module.out_features
+            # output shape is usually (batch, ..., out_features)
+            num_out_elements = output.numel() // out_features
+            flops = batch_size * num_out_elements * (2 * in_features - 1) * out_features
+            flop_counter.add_flops(name, flops)
+        return hook
+
+    def conv_hook(name):
+        def hook(module, input, output):
+            # FLOPs = 2 * k_h * k_w * in_channels * out_channels * out_h * out_w / groups
+            batch_size = output.size(0)
+            out_channels = module.out_channels
+            out_h, out_w = output.size(2), output.size(3)
+            kernel_ops = module.kernel_size[0] * module.kernel_size[1] * (module.in_channels // module.groups)
+            flops = batch_size * out_channels * out_h * out_w * (2 * kernel_ops - 1)
+            flop_counter.add_flops(name, flops)
+        return hook
+
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            module.register_forward_hook(linear_hook(name))
+        elif isinstance(module, torch.nn.Conv2d):
+            module.register_forward_hook(conv_hook(name))
+    
+    return model
+
 def hook_function(name, collect_cross=True, collect_self=True, detach=True):
     def forward_hook(module, input, output):
         has_cross = hasattr(module.processor, "attn_map")

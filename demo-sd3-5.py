@@ -16,6 +16,7 @@ parser.add_argument("--collect_cross", action="store_true", default=False, help=
 parser.add_argument("--no_cross", action="store_false", dest="collect_cross", help="Disable cross-attention stats")
 parser.add_argument("--collect_self", action="store_true", default=False, help="Collect self-attention stats")
 parser.add_argument("--prompts", type=int, default=500, help="Number of prompts to process")
+parser.add_argument("--profile", action="store_true", help="Profile FLOPs")
 args = parser.parse_args()
 
 # 1. Load and sample prompts
@@ -30,6 +31,10 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
 pipe = pipe.to("cuda")
 pipe = init_pipeline(pipe, collect_cross_attn=args.collect_cross, collect_self_attn=args.collect_self)
 
+if args.profile:
+    from attention_map_diffusers.utils import register_flops_hook, flop_counter
+    pipe.transformer = register_flops_hook(pipe.transformer)
+
 # 3. Process and Save
 for i, prompt in enumerate(random_prompts):
     print(f"Processing prompt {i+1}/{args.prompts}")
@@ -37,6 +42,9 @@ for i, prompt in enumerate(random_prompts):
     output_dir = f"outputs_parti-prompts/{clean_prompt_snippet}"
     
     os.makedirs(output_dir, exist_ok=True)
+    
+    if args.profile:
+        flop_counter.reset()
     
     ###############################################################
     # CRITICAL: Clear prev_attn_map before each new prompt
@@ -49,6 +57,10 @@ for i, prompt in enumerate(random_prompts):
     ###############################################################
     # Run inference
     image = pipe(prompt, num_inference_steps=15, guidance_scale=4.5).images[0]
+
+    if args.profile:
+        print(f"\nFLOPs for prompt: {prompt[:50]}...")
+        flop_counter.print_summary()
     
     # Save image
     image.save(os.path.join(output_dir, "result.png"))

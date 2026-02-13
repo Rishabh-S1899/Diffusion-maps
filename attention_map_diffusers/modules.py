@@ -1798,6 +1798,22 @@ def attn_call(
         key = attn.head_to_batch_dim(key)
         value = attn.head_to_batch_dim(value)
 
+        ####################################################################################################
+        from .utils import flop_counter
+        # query shape: (batch*heads, seq_len, head_dim)
+        BH = query.shape[0]
+        Lq = query.shape[1]
+        Lk = key.shape[1]
+        D = query.shape[2]
+        
+        # Q * K^T
+        flop_counter.add_flops("attention_q_k", 2 * BH * Lq * Lk * D)
+        # Softmax (roughly inside get_attention_scores)
+        flop_counter.add_flops("attention_softmax", 3 * BH * Lq * Lk)
+        # Prob * V
+        flop_counter.add_flops("attention_prob_v", 2 * BH * Lq * Lk * D)
+        ####################################################################################################
+
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         ####################################################################################################
         collect_cross = getattr(self, "collect_cross_attn", False)
@@ -1943,6 +1959,19 @@ def attn_call2_0(
     # the output of sdp = (batch, num_heads, seq_len, head_dim)
     # TODO: add support for attn.scale when we move to Torch 2.1
     ####################################################################################################
+    from .utils import flop_counter
+    Lq = query.shape[2]
+    Lk = key.shape[2]
+    D = head_dim
+    B = batch_size
+    H = attn.heads
+    # Q * K^T
+    flop_counter.add_flops("attention_q_k", 2 * B * H * Lq * Lk * D)
+    # Softmax
+    flop_counter.add_flops("attention_softmax", 3 * B * H * Lq * Lk)
+    # Prob * V
+    flop_counter.add_flops("attention_prob_v", 2 * B * H * Lq * Lk * D)
+
     collect_cross = getattr(self, "collect_cross_attn", False)
     collect_self = getattr(self, "collect_self_attn", False)
     is_cross = encoder_hidden_states is not None
@@ -2240,6 +2269,19 @@ def joint_attn_call2_0(
         value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
 
     ####################################################################################################
+    from .utils import flop_counter
+    Lq = query.shape[2]
+    Lk = key.shape[2]
+    D = head_dim
+    B = batch_size
+    H = attn.heads
+    # Q * K^T
+    flop_counter.add_flops("attention_q_k", 2 * B * H * Lq * Lk * D)
+    # Softmax
+    flop_counter.add_flops("attention_softmax", 3 * B * H * Lq * Lk)
+    # Prob * V
+    flop_counter.add_flops("attention_prob_v", 2 * B * H * Lq * Lk * D)
+
     collect_cross = getattr(self, "collect_cross_attn", False)
     collect_self = getattr(self, "collect_self_attn", False)
 
@@ -2394,6 +2436,19 @@ def flux_attn_call2_0(
         key = apply_rotary_emb(key, image_rotary_emb)
 
     ####################################################################################################
+    from .utils import flop_counter
+    Lq = query.shape[2]
+    Lk = key.shape[2]
+    D = head_dim
+    B = batch_size
+    H = attn.heads
+    # Q * K^T
+    flop_counter.add_flops("attention_q_k", 2 * B * H * Lq * Lk * D)
+    # Softmax
+    flop_counter.add_flops("attention_softmax", 3 * B * H * Lq * Lk)
+    # Prob * V
+    flop_counter.add_flops("attention_prob_v", 2 * B * H * Lq * Lk * D)
+
     collect_cross = getattr(self, "collect_cross_attn", False)
     collect_self = getattr(self, "collect_self_attn", False)
 
