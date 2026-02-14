@@ -130,8 +130,14 @@ def joint_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_stat
 def flux_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_states=None, attention_mask=None, image_rotary_emb=None, height=None, timestep=None) -> torch.FloatTensor:
     batch_size = hidden_states.shape[0] if encoder_hidden_states is None else encoder_hidden_states.shape[0]
     from .utils import flop_counter, cache_schedule, top_k_k
-    ts_val, layer_name = str(int(timestep[0].item())), getattr(self, "layer_name", None)
-    config = cache_schedule.get(ts_val, {}).get(layer_name, {})
+    # Safety check for timestep
+    if timestep is not None:
+        ts_val = str(int(timestep[0].item())) if torch.is_tensor(timestep) else str(int(timestep))
+    else:
+        ts_val = None
+        
+    layer_name = getattr(self, "layer_name", None)
+    config = cache_schedule.get(ts_val, {}).get(layer_name, {}) if ts_val else {}
     use_cache, use_top_k = (config.get("cache", False), config.get("top_k", False)) if isinstance(config, dict) else (config, False)
 
     if use_cache and not use_top_k and hasattr(self, "prev_attn_output"):
@@ -285,8 +291,14 @@ def attn_call(self, attn: Attention, hidden_states, encoder_hidden_states=None, 
         hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
     
     from .utils import flop_counter, cache_schedule, top_k_k
-    ts_val, layer_name = str(int(timestep.item())), getattr(self, "layer_name", None)
-    config = cache_schedule.get(ts_val, {}).get(layer_name, {})
+    # Safety check for timestep
+    if timestep is not None:
+        ts_val = str(int(timestep.item())) if torch.is_tensor(timestep) else str(int(timestep))
+    else:
+        ts_val = None
+        
+    layer_name = getattr(self, "layer_name", None)
+    config = cache_schedule.get(ts_val, {}).get(layer_name, {}) if ts_val else {}
     use_cache, use_top_k = (config.get("cache", False), config.get("top_k", False)) if isinstance(config, dict) else (config, False)
 
     if use_cache and not use_top_k and hasattr(self, "prev_attn_output"):
