@@ -18,7 +18,6 @@ parser.add_argument("--collect_self", action="store_true", default=False, help="
 parser.add_argument("--prompts", type=int, default=500, help="Number of prompts to process")
 parser.add_argument("--profile", action="store_true", help="Profile FLOPs")
 parser.add_argument("--cache_schedule", type=str, default=None, help="Path to cache schedule JSON")
-parser.add_argument("--k", type=int, default=0, help="K for top-k sparsification")
 args = parser.parse_args()
 
 # 1. Load and sample prompts
@@ -32,7 +31,7 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
 )
 pipe = pipe.to("cuda")
 pipe = init_pipeline(pipe, collect_cross_attn=args.collect_cross, collect_self_attn=args.collect_self, 
-                     cache_schedule_path=args.cache_schedule, k=args.k)
+                     cache_schedule_path=args.cache_schedule)
 
 if args.profile:
     from attention_map_diffusers.utils import register_flops_hook, flop_counter
