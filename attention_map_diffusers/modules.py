@@ -42,8 +42,14 @@ def joint_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_stat
     residual, batch_size = hidden_states, hidden_states.shape[0]
     
     from .utils import flop_counter, cache_schedule, top_k_k
-    ts_val, layer_name = str(int(timestep[0].item())), getattr(self, "layer_name", None)
-    config = cache_schedule.get(ts_val, {}).get(layer_name, {})
+    # Safety check for timestep
+    if timestep is not None:
+        ts_val = str(int(timestep[0].item())) if torch.is_tensor(timestep) else str(int(timestep))
+    else:
+        ts_val = None
+        
+    layer_name = getattr(self, "layer_name", None)
+    config = cache_schedule.get(ts_val, {}).get(layer_name, {}) if ts_val else {}
     use_cache, use_top_k = (config.get("cache", False), config.get("top_k", False)) if isinstance(config, dict) else (config, False)
 
     # OUTPUT CACHING (Strategy 3: Full Skip)
@@ -490,7 +496,7 @@ def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, tem
 
     hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
     if self.use_dual_attention:
-        attn_output2 = self.attn2(hidden_states=norm_hidden_states2)
+        attn_output2 = self.attn2(hidden_states=norm_hidden_states2, timestep=timestep, height=height)
         hidden_states = hidden_states + gate_msa2.unsqueeze(1) * attn_output2
 
     hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
