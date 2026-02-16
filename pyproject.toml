@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=4.5.0",
     "diffusers>=0.29.0",
     "einops>=0.8.2",
+    "image-reward>=1.5",
     "matplotlib>=3.10.8",
     "pillow>=12.1.0",
     "protobuf>=6.33.5",
