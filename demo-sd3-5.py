@@ -16,11 +16,15 @@ def main():
     parser.add_argument("--cache_schedule", type=str, default=None, help="Path to cache schedule JSON")
     parser.add_argument("--quantize_cache", action="store_true", help="Quantize cached hidden states to 8-bit")
     parser.add_argument("--output_dir", type=str, default="outputs_inference", help="Output directory")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
 
     # 1. Load prompts
+    random.seed(args.seed)
     ds = load_dataset("nateraw/parti-prompts", split="train")
-    random_prompts = random.sample(ds['Prompt'], args.prompts)
+    # Sort or use fixed index to be even safer across dataset versions
+    all_prompts = sorted(ds['Prompt']) 
+    random_prompts = random.sample(all_prompts, args.prompts)
 
     # 2. Setup Pipeline
     pipe = StableDiffusion3Pipeline.from_pretrained(
