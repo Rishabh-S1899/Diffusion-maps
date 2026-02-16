@@ -50,12 +50,18 @@ def main():
             if hasattr(module, 'prev_context_attn_output'): delattr(module, 'prev_context_attn_output')
 
         # Run inference
+        if torch.cuda.is_available(): torch.cuda.reset_peak_memory_stats()
+        
         with torch.no_grad():
             image = pipe(prompt, num_inference_steps=15, guidance_scale=4.5).images[0]
         
         if args.profile:
             print(f"\nFLOPs Summary for: {prompt[:50]}...")
             flop_counter.print_summary()
+        
+        if torch.cuda.is_available():
+            peak_vram = torch.cuda.max_memory_allocated() / (1024**3)
+            print(f"Peak VRAM Usage: {peak_vram:.4f} GB")
 
         image.save(os.path.join(prompt_dir, "result.png"))
         with open(os.path.join(prompt_dir, "prompt.txt"), 'w') as f: f.write(prompt)
