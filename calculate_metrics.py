@@ -63,9 +63,13 @@ def calculate_metrics(base_dir, use_clip=True, use_reward=True):
             # Calculate ImageReward
             if use_reward:
                 with torch.no_grad():
-                    # reward_model.score handles internal preprocessing
-                    reward_score = reward_model.score(prompt, image)
-                    reward_scores.append(reward_score)
+                    # The image-reward package expects model.score(prompt, [image_path_or_PIL])
+                    # It returns a list of scores if a list is passed, or a single float for one image
+                    reward_score = reward_model.score(prompt, [image])
+                    # If it returns a list, take the first element
+                    if isinstance(reward_score, list):
+                        reward_score = reward_score[0]
+                    reward_scores.append(float(reward_score))
                     
         except Exception as e:
             print(f"Error processing {folder.name}: {e}")
