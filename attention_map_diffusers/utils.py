@@ -187,11 +187,6 @@ def replace_call_method_for_flux(model):
 
 
 def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True, cache_schedule_path=None):
-    # TRUE BASELINE BYPASS: If nothing is requested, do absolutely nothing.
-    if not collect_cross_attn and not collect_self_attn and not cache_schedule_path:
-        print("Bypassing pipeline initialization: Running in pure baseline mode.")
-        return pipeline
-
     if cache_schedule_path:
         load_cache_schedule(cache_schedule_path)
 
