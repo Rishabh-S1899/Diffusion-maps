@@ -53,6 +53,7 @@ def main():
             image = pipe(prompt, num_inference_steps=15, guidance_scale=4.5).images[0]
         
         if args.profile:
+            print(f"\nFLOPs Summary for: {prompt[:50]}...")
             flop_counter.print_summary()
 
         image.save(os.path.join(prompt_dir, "result.png"))

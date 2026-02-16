@@ -26,7 +26,7 @@ def main():
         torch_dtype=torch.bfloat16
     ).to("cuda")
     
-    # We enable stats collection (Cross is enabled by default in init_pipeline)
+    # Enable stats collection (Cross is enabled if collect_cross_attn=True)
     pipe = init_pipeline(pipe, collect_cross_attn=True, collect_self_attn=args.collect_self)
 
     # 3. Process and Save
@@ -36,7 +36,7 @@ def main():
         prompt_dir = os.path.join(args.output_dir, clean_name)
         os.makedirs(prompt_dir, exist_ok=True)
 
-        # Clear prev state
+        # Clear prev state for stats collection
         for _, module in pipe.transformer.named_modules():
             if hasattr(module, 'processor'):
                 if hasattr(module.processor, 'prev_attn_map'): delattr(module.processor, 'prev_attn_map')
@@ -46,10 +46,11 @@ def main():
         with torch.no_grad():
             pipe(prompt, num_inference_steps=15, guidance_scale=4.5)
         
-        # Save results
+        # Save results (only statistics.json)
         save_attention_stats(attn_maps, base_dir=prompt_dir)
         with open(os.path.join(prompt_dir, "prompt.txt"), 'w') as f: f.write(prompt)
         
+        # Clear maps for next prompt
         attn_maps.clear()
 
 if __name__ == "__main__":
