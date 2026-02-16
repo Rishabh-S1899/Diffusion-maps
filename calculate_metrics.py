@@ -16,19 +16,22 @@ def calculate_metrics(base_dir, use_clip=True, use_reward=True):
     reward_model = None
     
     if use_clip:
-        print("Loading CLIP model...")
+        print("Loading CLIP model (openai/clip-vit-base-patch32)...")
         clip_id = "openai/clip-vit-base-patch32"
         clip_model = CLIPModel.from_pretrained(clip_id).to(device)
         clip_processor = CLIPProcessor.from_pretrained(clip_id)
         
     if use_reward:
-        print("Loading ImageReward model...")
+        print("Loading ImageReward model (v1.0)...")
         try:
             import ImageReward as RM
+            # RM.load handles downloading and loading the weights
             reward_model = RM.load("ImageReward-v1.0")
             reward_model.to(device)
-        except ImportError:
-            print("Error: 'ImageReward' package not found. Run 'pip install ImageReward'.")
+            reward_model.eval()
+        except Exception as e:
+            print(f"\nCRITICAL ERROR loading ImageReward: {e}")
+            print("Please ensure you ran: uv pip install image-reward")
             use_reward = False
 
     base_path = Path(base_dir)
@@ -39,6 +42,7 @@ def calculate_metrics(base_dir, use_clip=True, use_reward=True):
     clip_scores = []
     reward_scores = []
     
+    # Identify prompt folders
     prompt_folders = [f for f in base_path.iterdir() if f.is_dir()]
     
     for folder in tqdm(prompt_folders, desc="Processing Images"):
@@ -53,23 +57,23 @@ def calculate_metrics(base_dir, use_clip=True, use_reward=True):
             with open(txt_path, 'r') as f:
                 prompt = f.read().strip()
             
-            # Calculate CLIP
+            # 1. Calculate CLIP
             if use_clip:
                 inputs = clip_processor(text=[prompt], images=image, return_tensors="pt", padding=True).to(device)
                 with torch.no_grad():
-                    clip_score = clip_model(**inputs).logits_per_image.item() / 100.0
-                    clip_scores.append(clip_score)
+                    # logits_per_image is cosine similarity * 100
+                    score = clip_model(**inputs).logits_per_image.item() / 100.0
+                    clip_scores.append(score)
             
-            # Calculate ImageReward
+            # 2. Calculate ImageReward
             if use_reward:
                 with torch.no_grad():
-                    # The image-reward package expects model.score(prompt, [image_path_or_PIL])
-                    # It returns a list of scores if a list is passed, or a single float for one image
-                    reward_score = reward_model.score(prompt, [image])
-                    # If it returns a list, take the first element
-                    if isinstance(reward_score, list):
-                        reward_score = reward_score[0]
-                    reward_scores.append(float(reward_score))
+                    # The model.score method expects (prompt, list_of_images)
+                    # It returns a list of floats
+                    score = reward_model.score(prompt, [image])
+                    if isinstance(score, list):
+                        score = score[0]
+                    reward_scores.append(float(score))
                     
         except Exception as e:
             print(f"Error processing {folder.name}: {e}")
@@ -77,7 +81,7 @@ def calculate_metrics(base_dir, use_clip=True, use_reward=True):
     # --- Summary ---
     results = {"directory": base_dir, "sample_count": len(prompt_folders)}
     
-    print(f"Final Results for {base_dir}:")
+    print(f"\nFinal Results for {base_dir}:")
     if use_clip and clip_scores:
         avg_clip = sum(clip_scores) / len(clip_scores)
         results["average_clip_score"] = avg_clip
@@ -98,7 +102,6 @@ def main():
     parser.add_argument("--output_json", type=str, default=None, help="Save result to a JSON file")
     args = parser.parse_args()
     
-    # If no metrics are specified, default to printing a warning
     if not args.clip and not args.reward:
         print("Warning: No metrics enabled. Use --clip or --reward.")
         return
