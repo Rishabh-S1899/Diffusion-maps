@@ -400,7 +400,7 @@ def FluxTransformer2DModelForward(self, hidden_states, encoder_hidden_states=Non
 
 def Transformer2DModelForward(self, hidden_states, encoder_hidden_states=None, timestep=None, added_cond_kwargs=None, class_labels=None, cross_attention_kwargs=None, attention_mask=None, encoder_attention_mask=None, return_dict=True):
     if attention_mask is not None and attention_mask.ndim == 2: attention_mask = (1 - attention_mask.to(hidden_states.dtype)) * -10000.0; attention_mask = attention_mask.unsqueeze(1)
-    if encoder_attention_mask is not None vibrato_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0; encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
+    if encoder_attention_mask is not None: encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0; encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
     if self.is_input_continuous:
         batch_size, _, height, width = hidden_states.shape; residual = hidden_states; hidden_states, inner_dim = self._operate_on_continuous_inputs(hidden_states)
     elif self.is_input_patches:
