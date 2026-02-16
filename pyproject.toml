@@ -10,6 +10,7 @@ dependencies = [
     "diffusers>=0.29.0",
     "einops>=0.8.2",
     "matplotlib>=3.10.8",
+    "pillow>=12.1.0",
     "protobuf>=6.33.5",
     "seaborn>=0.13.2",
     "sentencepiece>=0.2.1",
