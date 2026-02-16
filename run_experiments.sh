@@ -18,7 +18,7 @@ echo "===================================================================="
 
 # 1. BASELINE RUN
 echo -e "\n[1/3] RUNNING BASELINE..."
-uv run python demo-sd3-5.py --prompts $PROMPTS --seed $SEED --profile --no_cross --output_dir "$BASE_OUT/baseline"
+uv run python demo-sd3-5.py --prompts $PROMPTS --seed $SEED --profile --output_dir "$BASE_OUT/baseline"
 
 # 2. CACHING RUN
 echo -e "\n[2/3] RUNNING CACHING..."
