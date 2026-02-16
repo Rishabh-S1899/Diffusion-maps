@@ -32,9 +32,23 @@ def manual_scaled_dot_product_attention(query, key, value, attn_mask=None, dropo
     attn_weight = torch.softmax(query @ key.transpose(-2, -1) * scale_factor + attn_bias.to(query.device), dim=-1)
     return torch.dropout(attn_weight, dropout_p, train=True) @ value, attn_weight
 
+def quantize_tensor(x):
+    """8-bit linear quantization: map min..max to 0..255"""
+    if x is None: return None
+    min_val = x.min()
+    max_val = x.max()
+    scale = (max_val - min_val) / 255.0
+    if scale == 0: scale = 1.0
+    q_x = ((x - min_val) / scale).round().to(torch.uint8)
+    return q_x, min_val, scale
+
+def dequantize_tensor(q_x, min_val, scale, dtype):
+    """Convert 8-bit back to original range and dtype"""
+    if q_x is None: return None
+    return (q_x.to(dtype) * scale) + min_val
+
 def joint_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_states=None, attention_mask=None, height=None, timestep=None, *args, **kwargs) -> torch.FloatTensor:
     residual, batch_size = hidden_states, hidden_states.shape[0]
-    
     query, key, value = attn.to_q(hidden_states), attn.to_k(hidden_states), attn.to_v(hidden_states)
     inner_dim, head_dim = key.shape[-1], key.shape[-1] // attn.heads
     query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
@@ -42,12 +56,9 @@ def joint_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_stat
     value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
     if attn.norm_q is not None: query = attn.norm_q(query)
     if attn.norm_k is not None: key = attn.norm_k(key)
-    
     if encoder_hidden_states is not None:
         eq, ek, ev = attn.add_q_proj(encoder_hidden_states), attn.add_k_proj(encoder_hidden_states), attn.add_v_proj(encoder_hidden_states)
-        eq = eq.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        ek = ek.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        ev = ev.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        eq, ek, ev = [x.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2) for x in [eq, ek, ev]]
         if attn.norm_added_q is not None: eq = attn.norm_added_q(eq)
         if attn.norm_added_k is not None: ek = attn.norm_added_k(ek)
         query, key, value = torch.cat([query, eq], dim=2), torch.cat([key, ek], dim=2), torch.cat([value, ev], dim=2)
@@ -59,18 +70,17 @@ def joint_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_stat
     flop_counter.add_flops("attention_prob_v", 2 * batch_size * attn.heads * Lq * Lk * head_dim)
 
     collect_cross, collect_self = getattr(self, "collect_cross_attn", False), getattr(self, "collect_self_attn", False)
-    
     if (collect_cross or collect_self) and encoder_hidden_states is not None:
         hidden_states, attention_probs = manual_scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
-        image_length = Lq - eq.shape[2]
+        img_len = Lq - eq.shape[2]
         if collect_cross:
-            ac = attention_probs[:, :, :image_length, image_length:].cpu()
+            ac = attention_probs[:, :, :img_len, img_len:].cpu()
             if hasattr(self, 'prev_attn_map'): self.similarity = F.cosine_similarity(ac.flatten(1), self.prev_attn_map.flatten(1), dim=1).mean().item()
             else: self.similarity = 0.0
             self.entropy = -(ac * torch.log(ac + 1e-10)).sum(dim=-1).mean().item()
             self.prev_attn_map, self.attn_map = ac.clone(), rearrange(ac, 'b h (ht w) d -> b h ht w d', ht=height)
         if collect_self:
-            aself = attention_probs[:, :, :image_length, :image_length].cpu()
+            aself = attention_probs[:, :, :img_len, :img_len].cpu()
             if hasattr(self, 'prev_self_attn_map'): self.self_similarity = F.cosine_similarity(aself.flatten(1), self.prev_self_attn_map.flatten(1), dim=1).mean().item()
             else: self.self_similarity = 0.0
             self.self_entropy = -(aself * torch.log(aself + 1e-10)).sum(dim=-1).mean().item()
@@ -90,31 +100,22 @@ def flux_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_state
     batch_size = hidden_states.shape[0] if encoder_hidden_states is None else encoder_hidden_states.shape[0]
     query, key, value = attn.to_q(hidden_states), attn.to_k(hidden_states), attn.to_v(hidden_states)
     inner_dim, head_dim = key.shape[-1], key.shape[-1] // attn.heads
-    query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-    key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-    value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+    query, key, value = [x.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2) for x in [query, key, value]]
     if attn.norm_q is not None: query = attn.norm_q(query)
     if attn.norm_k is not None: key = attn.norm_k(key)
-    
     if encoder_hidden_states is not None:
-        eq, ek, ev = attn.add_q_proj(encoder_hidden_states), attn.add_k_proj(encoder_hidden_states), attn.add_v_proj(encoder_hidden_states)
-        eq = eq.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        ek = ek.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        ev = ev.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        eq, ek, ev = [x.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2) for x in [attn.add_q_proj(encoder_hidden_states), attn.add_k_proj(encoder_hidden_states), attn.add_v_proj(encoder_hidden_states)]]
         if attn.norm_added_q is not None: eq = attn.norm_added_q(eq)
         if attn.norm_added_k is not None: ek = attn.norm_added_k(ek)
         query, key, value = torch.cat([eq, query], dim=2), torch.cat([ek, key], dim=2), torch.cat([ev, value], dim=2)
-    
     if image_rotary_emb is not None:
         from diffusers.models.embeddings import apply_rotary_emb
         query, key = apply_rotary_emb(query, image_rotary_emb), apply_rotary_emb(key, image_rotary_emb)
-
     from .utils import flop_counter
     Lq, Lk = query.shape[2], key.shape[2]
     flop_counter.add_flops("attention_q_k", 2 * batch_size * attn.heads * Lq * Lk * head_dim)
     flop_counter.add_flops("attention_softmax", 3 * batch_size * attn.heads * Lq * Lk)
     flop_counter.add_flops("attention_prob_v", 2 * batch_size * attn.heads * Lq * Lk * head_dim)
-
     collect_cross, collect_self = getattr(self, "collect_cross_attn", False), getattr(self, "collect_self_attn", False)
     if (collect_cross or collect_self) and encoder_hidden_states is not None:
         hidden_states, attention_probs = manual_scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
@@ -134,7 +135,6 @@ def flux_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_state
         self.timestep = int(timestep[0].item())
     else:
         hidden_states = F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False)
-
     hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim).to(query.dtype)
     if encoder_hidden_states is not None:
         encoder_hidden_states, hidden_states = hidden_states[:, : encoder_hidden_states.shape[1]], hidden_states[:, encoder_hidden_states.shape[1] :]
@@ -148,28 +148,18 @@ def attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_states=Non
     if input_ndim == 4:
         batch_size, channel, height, width = hidden_states.shape
         hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
-    
-    batch_size = hidden_states.shape[0]
-    is_cross = encoder_hidden_states is not None
+    batch_size, is_cross = hidden_states.shape[0], encoder_hidden_states is not None
     if encoder_hidden_states is None: encoder_hidden_states = hidden_states
     elif attn.norm_cross: encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
-    
-    query, key, value = attn.to_q(hidden_states), attn.to_k(encoder_hidden_states), attn.to_v(encoder_hidden_states)
-    inner_dim, head_dim = key.shape[-1], key.shape[-1] // attn.heads
-    query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-    key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-    value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
+    query, key, value = [x.view(batch_size, -1, attn.heads, x.shape[-1]//attn.heads).transpose(1, 2) for x in [attn.to_q(hidden_states), attn.to_k(encoder_hidden_states), attn.to_v(encoder_hidden_states)]]
     from .utils import flop_counter
     BH, Lq, Lk = batch_size * attn.heads, query.shape[2], key.shape[2]
-    flop_counter.add_flops("attention_q_k", 2 * BH * Lq * Lk * head_dim)
+    flop_counter.add_flops("attention_q_k", 2 * BH * Lq * Lk * query.shape[3])
     flop_counter.add_flops("attention_softmax", 3 * BH * Lq * Lk)
-    flop_counter.add_flops("attention_prob_v", 2 * BH * Lq * Lk * head_dim)
-
+    flop_counter.add_flops("attention_prob_v", 2 * BH * Lq * Lk * query.shape[3])
     if attention_mask is not None:
         attention_mask = attn.prepare_attention_mask(attention_mask, Lk, batch_size)
         attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
-
     collect_cross, collect_self = getattr(self, "collect_cross_attn", False), getattr(self, "collect_self_attn", False)
     if (collect_cross and is_cross) or (collect_self and not is_cross):
         hidden_states, attention_probs = manual_scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
@@ -185,10 +175,8 @@ def attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_states=Non
             self.self_entropy = -(ac * torch.log(ac + 1e-10)).sum(dim=-1).mean().item()
             self.prev_self_attn_map, self.self_attn_map = ac.clone(), rearrange(ac, 'b h (ht w) d -> b h ht w d', ht=height)
         self.timestep = int(timestep.item())
-    else:
-        hidden_states = F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False)
-
-    hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim).to(query.dtype)
+    else: hidden_states = F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False)
+    hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, query.shape[3] * attn.heads).to(query.dtype)
     hidden_states = attn.to_out[1](attn.to_out[0](hidden_states))
     if input_ndim == 4: hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
     if attn.residual_connection: hidden_states = hidden_states + residual
@@ -201,22 +189,16 @@ def attn_call(self, attn: Attention, hidden_states, encoder_hidden_states=None, 
     if input_ndim == 4:
         batch_size, channel, height, width = hidden_states.shape
         hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
-    
     is_cross = encoder_hidden_states is not None
     if encoder_hidden_states is None: encoder_hidden_states = hidden_states
     elif attn.norm_cross: encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
-    
-    query, key, value = attn.to_q(hidden_states), attn.to_k(encoder_hidden_states), attn.to_v(encoder_hidden_states)
-    query, key, value = attn.head_to_batch_dim(query), attn.head_to_batch_dim(key), attn.head_to_batch_dim(value)
-
+    query, key, value = [attn.head_to_batch_dim(x) for x in [attn.to_q(hidden_states), attn.to_k(encoder_hidden_states), attn.to_v(encoder_hidden_states)]]
     from .utils import flop_counter
     BH, Lq, Lk = query.shape[0], query.shape[1], key.shape[1]
     flop_counter.add_flops("attention_q_k", 2 * BH * Lq * Lk * query.shape[2])
     flop_counter.add_flops("attention_softmax", 3 * BH * Lq * Lk)
     flop_counter.add_flops("attention_prob_v", 2 * BH * Lq * Lk * value.shape[2])
-
     attention_mask = attn.prepare_attention_mask(attention_mask, Lk, hidden_states.shape[0])
-    
     collect_cross, collect_self = getattr(self, "collect_cross_attn", False), getattr(self, "collect_self_attn", False)
     if (collect_cross and is_cross) or (collect_self and not is_cross):
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
@@ -236,7 +218,6 @@ def attn_call(self, attn: Attention, hidden_states, encoder_hidden_states=None, 
     else:
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         hidden_states = torch.bmm(attention_probs, value)
-
     hidden_states = attn.to_out[1](attn.to_out[0](attn.batch_to_head_dim(hidden_states)))
     if input_ndim == 4: hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
     if attn.residual_connection: hidden_states = hidden_states + residual
@@ -352,20 +333,22 @@ def BasicTransformerBlockForward(self, hidden_states, attention_mask=None, encod
     if self.pos_embed is not None: norm = self.pos_embed(norm)
     cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs else {}
     attn_params = set(inspect.signature(self.attn1.processor.__call__).parameters.keys())
-    
-    # Block-level caching for BasicTransformerBlock
     ts_val = str(int(timestep.item())) if timestep is not None else None
     layer_name = getattr(self, "layer_name", None)
-    from .utils import cache_schedule
+    from .utils import cache_schedule, do_quantize_cache
     config = cache_schedule.get(ts_val, {}).get(layer_name, False)
     use_cache = config if isinstance(config, bool) else config.get("cache", False)
-    
     if use_cache and hasattr(self, "prev_attn_output"):
-        attn_output = self.prev_attn_output
+        if do_quantize_cache and hasattr(self, "q_info"):
+            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype)
+        else: attn_output = self.prev_attn_output
     else:
         attn_output = self.attn1(norm, encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None, attention_mask=attention_mask, **{k:v for k,v in cross_attention_kwargs.items() if k in attn_params})
-        if ts_val and layer_name: self.prev_attn_output = attn_output
-
+        if ts_val and layer_name:
+            if do_quantize_cache:
+                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output)
+                self.q_info = (min_v, scale)
+            else: self.prev_attn_output = attn_output
     hidden_states = (gate_msa.unsqueeze(1) * attn_output) + hidden_states
     if self.attn2 is not None:
         norm2 = self.norm2(hidden_states, timestep) if self.norm_type == "ada_norm" else self.norm2(hidden_states)
@@ -376,33 +359,32 @@ def BasicTransformerBlockForward(self, hidden_states, attention_mask=None, encod
     return hidden_states.squeeze(1) if hidden_states.ndim == 4 else hidden_states
 
 def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, temb, height=None, timestep=None):
-    if self.use_dual_attention:
-        norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp, norm_hidden_states2, gate_msa2 = self.norm1(hidden_states, emb=temb)
-    else:
-        norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
-
-    if self.context_pre_only:
-        norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states, temb)
-    else:
-        norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
-    
-    ts_val = str(int(timestep[0].item())) if timestep is not None else None
-    layer_name = getattr(self, "layer_name", None)
-    from .utils import cache_schedule
-    config = cache_schedule.get(ts_val, {}).get(layer_name, {})
+    if self.use_dual_attention: norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp, norm_hidden_states2, gate_msa2 = self.norm1(hidden_states, emb=temb)
+    else: norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
+    if self.context_pre_only: norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states, temb)
+    else: norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
+    ts_val, layer_name = str(int(timestep[0].item())) if timestep is not None else None, getattr(self, "layer_name", None)
+    from .utils import cache_schedule, do_quantize_cache
+    config = cache_schedule.get(ts_val, {}).get(layer_name, False)
     use_cache = config if isinstance(config, bool) else config.get("cache", False)
-    
     if use_cache and hasattr(self, "prev_attn_output"):
-        attn_output, context_attn_output = self.prev_attn_output, self.prev_context_attn_output
+        if do_quantize_cache and hasattr(self, "q_info"):
+            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype)
+            context_attn_output = dequantize_tensor(self.prev_context_attn_output, self.qc_info[0], self.q_info[1], hidden_states.dtype) if not self.context_pre_only else None
+        else:
+            attn_output, context_attn_output = self.prev_attn_output, self.prev_context_attn_output
     else:
         attn_output, context_attn_output = self.attn(norm_hidden_states, encoder_hidden_states=norm_encoder_hidden_states, timestep=timestep, height=height)
-        if ts_val and layer_name: self.prev_attn_output, self.prev_context_attn_output = attn_output, context_attn_output
-
+        if ts_val and layer_name:
+            if do_quantize_cache:
+                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output)
+                self.q_info = (min_v, scale)
+                if not self.context_pre_only:
+                    self.prev_context_attn_output, min_vc, scalec = quantize_tensor(context_attn_output)
+                    self.qc_info = (min_vc, scalec)
+            else: self.prev_attn_output, self.prev_context_attn_output = attn_output, context_attn_output
     hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
-    if self.use_dual_attention:
-        attn_output2 = self.attn2(hidden_states=norm_hidden_states2)
-        hidden_states = hidden_states + gate_msa2.unsqueeze(1) * attn_output2
-
+    if self.use_dual_attention: hidden_states = hidden_states + gate_msa2.unsqueeze(1) * self.attn2(hidden_states=norm_hidden_states2)
     hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
     if not self.context_pre_only:
         encoder_hidden_states = encoder_hidden_states + c_gate_msa.unsqueeze(1) * context_attn_output
@@ -412,19 +394,24 @@ def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, tem
 def FluxTransformerBlockForward(self, hidden_states, encoder_hidden_states, temb, image_rotary_emb=None, joint_attention_kwargs=None, height=None, width=None, timestep=None):
     norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
     norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
-    
-    ts_val = str(int(timestep[0].item())) if timestep is not None else None
-    layer_name = getattr(self, "layer_name", None)
-    from .utils import cache_schedule
-    config = cache_schedule.get(ts_val, {}).get(layer_name, {})
+    ts_val, layer_name = str(int(timestep[0].item())) if timestep is not None else None, getattr(self, "layer_name", None)
+    from .utils import cache_schedule, do_quantize_cache
+    config = cache_schedule.get(ts_val, {}).get(layer_name, False)
     use_cache = config if isinstance(config, bool) else config.get("cache", False)
-
     if use_cache and hasattr(self, "prev_attn_output"):
-        attn_output, context_attn_output = self.prev_attn_output, self.prev_context_attn_output
+        if do_quantize_cache and hasattr(self, "q_info"):
+            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype)
+            context_attn_output = dequantize_tensor(self.prev_context_attn_output, self.qc_info[0], self.qc_info[1], hidden_states.dtype)
+        else: attn_output, context_attn_output = self.prev_attn_output, self.prev_context_attn_output
     else:
         attn_output, context_attn_output = self.attn(norm_hidden_states, encoder_hidden_states=norm_encoder_hidden_states, image_rotary_emb=image_rotary_emb, timestep=timestep, height=height, **(joint_attention_kwargs or {}))
-        if ts_val and layer_name: self.prev_attn_output, self.prev_context_attn_output = attn_output, context_attn_output
-
+        if ts_val and layer_name:
+            if do_quantize_cache:
+                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output)
+                self.q_info = (min_v, scale)
+                self.prev_context_attn_output, min_vc, scalec = quantize_tensor(context_attn_output)
+                self.qc_info = (min_vc, scalec)
+            else: self.prev_attn_output, self.prev_context_attn_output = attn_output, context_attn_output
     hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
     hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
     encoder_hidden_states = encoder_hidden_states + c_gate_msa.unsqueeze(1) * context_attn_output

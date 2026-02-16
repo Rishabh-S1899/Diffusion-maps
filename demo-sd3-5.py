@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--prompts", type=int, default=1, help="Number of prompts to process")
     parser.add_argument("--profile", action="store_true", help="Profile FLOPs")
     parser.add_argument("--cache_schedule", type=str, default=None, help="Path to cache schedule JSON")
+    parser.add_argument("--quantize_cache", action="store_true", help="Quantize cached hidden states to 8-bit")
     parser.add_argument("--output_dir", type=str, default="outputs_inference", help="Output directory")
     args = parser.parse_args()
 
@@ -29,7 +30,7 @@ def main():
     
     # Disable stats collection for maximum speed
     pipe = init_pipeline(pipe, collect_cross_attn=False, collect_self_attn=False, 
-                         cache_schedule_path=args.cache_schedule)
+                         cache_schedule_path=args.cache_schedule, quantize_cache=args.quantize_cache)
 
     if args.profile:
         pipe.transformer = register_flops_hook(pipe.transformer)

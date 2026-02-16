@@ -16,6 +16,8 @@ from diffusers.models.attention_processor import (
 from .modules import *
 
 cache_schedule = {}
+top_k_k = 0
+do_quantize_cache = False
 
 def load_cache_schedule(path):
     global cache_schedule
@@ -186,7 +188,11 @@ def replace_call_method_for_flux(model):
     return model
 
 
-def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True, cache_schedule_path=None):
+def init_pipeline(pipeline, collect_cross_attn=True, collect_self_attn=True, cache_schedule_path=None, k=0, quantize_cache=False):
+    global top_k_k, do_quantize_cache
+    top_k_k = k
+    do_quantize_cache = quantize_cache
+    
     if cache_schedule_path:
         load_cache_schedule(cache_schedule_path)
 
