@@ -376,14 +376,20 @@ def BasicTransformerBlockForward(self, hidden_states, attention_mask=None, encod
     return hidden_states.squeeze(1) if hidden_states.ndim == 4 else hidden_states
 
 def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, temb, height=None, timestep=None):
-    norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
-    if self.context_pre_only: norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states, temb)
-    else: norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
+    if self.use_dual_attention:
+        norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp, norm_hidden_states2, gate_msa2 = self.norm1(hidden_states, emb=temb)
+    else:
+        norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
+
+    if self.context_pre_only:
+        norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states, temb)
+    else:
+        norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
     
     ts_val = str(int(timestep[0].item())) if timestep is not None else None
     layer_name = getattr(self, "layer_name", None)
     from .utils import cache_schedule
-    config = cache_schedule.get(ts_val, {}).get(layer_name, False)
+    config = cache_schedule.get(ts_val, {}).get(layer_name, {})
     use_cache = config if isinstance(config, bool) else config.get("cache", False)
     
     if use_cache and hasattr(self, "prev_attn_output"):
@@ -393,6 +399,10 @@ def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, tem
         if ts_val and layer_name: self.prev_attn_output, self.prev_context_attn_output = attn_output, context_attn_output
 
     hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
+    if self.use_dual_attention:
+        attn_output2 = self.attn2(hidden_states=norm_hidden_states2)
+        hidden_states = hidden_states + gate_msa2.unsqueeze(1) * attn_output2
+
     hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
     if not self.context_pre_only:
         encoder_hidden_states = encoder_hidden_states + c_gate_msa.unsqueeze(1) * context_attn_output
@@ -406,7 +416,7 @@ def FluxTransformerBlockForward(self, hidden_states, encoder_hidden_states, temb
     ts_val = str(int(timestep[0].item())) if timestep is not None else None
     layer_name = getattr(self, "layer_name", None)
     from .utils import cache_schedule
-    config = cache_schedule.get(ts_val, {}).get(layer_name, False)
+    config = cache_schedule.get(ts_val, {}).get(layer_name, {})
     use_cache = config if isinstance(config, bool) else config.get("cache", False)
 
     if use_cache and hasattr(self, "prev_attn_output"):
