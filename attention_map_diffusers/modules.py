@@ -33,17 +33,21 @@ def manual_scaled_dot_product_attention(query, key, value, attn_mask=None, dropo
     return torch.dropout(attn_weight, dropout_p, train=True) @ value, attn_weight
 
 def quantize_tensor(x):
-    """8-bit linear quantization: map min..max to 0..255"""
+    """8-bit linear quantization: per-channel scaling along the last dimension"""
     if x is None: return None
-    min_val = x.min()
-    max_val = x.max()
+    # x shape is (batch, tokens, channels)
+    # Calculate min/max per channel (keep dims for broadcasting)
+    min_val = x.min(dim=1, keepdim=True)[0].min(dim=0, keepdim=True)[0]
+    max_val = x.max(dim=1, keepdim=True)[0].max(dim=0, keepdim=True)[0]
+    
     scale = (max_val - min_val) / 255.0
-    if scale == 0: scale = 1.0
+    scale[scale == 0] = 1.0
+    
     q_x = ((x - min_val) / scale).round().to(torch.uint8)
     return q_x, min_val, scale
 
 def dequantize_tensor(q_x, min_val, scale, dtype):
-    """Convert 8-bit back to original range and dtype"""
+    """Convert 8-bit back to original range using per-channel scale"""
     if q_x is None: return None
     return (q_x.to(dtype) * scale) + min_val
 
