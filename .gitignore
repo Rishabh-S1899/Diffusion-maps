@@ -19,3 +19,4 @@ logs
 *.jpg
 *logs*
 *outputs*/
+experiments*/
