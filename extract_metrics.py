@@ -62,11 +62,19 @@ def calculate_fisher(pipe, layers, device, prompts, timesteps):
     
     for i, prompt in enumerate(prompts):
         print(f"  Prompt {i+1}/{len(prompts)}: {prompt[:40]}...")
-        with torch.no_grad():
-            prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(prompt=prompt)
-            encoder_hidden_states = prompt_embeds.to(device=device, dtype=torch.bfloat16)
-            pooled_projections = pooled_prompt_embeds.to(device=device, dtype=torch.bfloat16)
-            hidden_states = torch.randn(batch_size, 16, 64, 64, device=device, dtype=torch.bfloat16)
+        try:
+            with torch.no_grad():
+                # SD3.5 requires prompts for all 3 encoders (CLIP-L, CLIP-G, T5)
+                # Passing the same string to all is the standard behavior
+                prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
+                    prompt=prompt, prompt_2=prompt, prompt_3=prompt
+                )
+                encoder_hidden_states = prompt_embeds.to(device=device, dtype=torch.bfloat16)
+                pooled_projections = pooled_prompt_embeds.to(device=device, dtype=torch.bfloat16)
+                hidden_states = torch.randn(batch_size, 16, 64, 64, device=device, dtype=torch.bfloat16)
+        except Exception as e:
+            print(f"    Error encoding prompt {i}: {e}")
+            continue
 
         for t_val in tqdm(timesteps, leave=False, desc="Timesteps"):
             timestep = torch.tensor([t_val], device=device, dtype=torch.bfloat16)
@@ -91,6 +99,21 @@ def calculate_fisher(pipe, layers, device, prompts, timesteps):
             
             model.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
+
+        # Periodic Save Checkpoint (every 10 prompts)
+        if (i + 1) % 10 == 0:
+            print(f"    Intermediate checkpoint saved at prompt {i+1}...")
+            temp_stats = {}
+            for name in raw_fisher:
+                temp_stats[name] = {}
+                for t in timesteps:
+                    vals = np.array(raw_fisher[name][t])
+                    if len(vals) > 0:
+                        temp_stats[name][f"fisher_t{t}_mean"] = float(np.mean(vals))
+                        temp_stats[name][f"fisher_t{t}_std"] = float(np.std(vals))
+            # Just to ensure we don't lose data on crash
+            with open("layer_metrics_checkpoint.json", 'w') as f:
+                json.dump(temp_stats, f, indent=2)
 
     # Aggregate statistics
     fisher_stats = {}
