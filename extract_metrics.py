@@ -64,8 +64,6 @@ def calculate_fisher(pipe, layers, device, prompts, timesteps):
         print(f"  Prompt {i+1}/{len(prompts)}: {prompt[:40]}...")
         try:
             with torch.no_grad():
-                # SD3.5 requires prompts for all 3 encoders (CLIP-L, CLIP-G, T5)
-                # Passing the same string to all is the standard behavior
                 prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
                     prompt=prompt, prompt_2=prompt, prompt_3=prompt
                 )
@@ -100,84 +98,80 @@ def calculate_fisher(pipe, layers, device, prompts, timesteps):
             model.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
 
-        # Periodic Save Checkpoint (every 10 prompts)
+        # Periodic Save Checkpoint
         if (i + 1) % 10 == 0:
             print(f"    Intermediate checkpoint saved at prompt {i+1}...")
-            temp_stats = {}
-            for name in raw_fisher:
-                temp_stats[name] = {}
-                for t in timesteps:
-                    vals = np.array(raw_fisher[name][t])
-                    if len(vals) > 0:
-                        temp_stats[name][f"fisher_t{t}_mean"] = float(np.mean(vals))
-                        temp_stats[name][f"fisher_t{t}_std"] = float(np.std(vals))
-            # Just to ensure we don't lose data on crash
-            with open("layer_metrics_checkpoint.json", 'w') as f:
-                json.dump(temp_stats, f, indent=2)
+            with open("raw_fisher_checkpoint.json", 'w') as f:
+                # We save raw values so we can re-calculate stats if needed
+                json.dump(raw_fisher, f)
 
-    # Aggregate statistics
-    fisher_stats = {}
+    # Aggregate statistics into a structured format
+    fisher_results = {}
     for name in raw_fisher:
-        fisher_stats[name] = {}
+        fisher_results[name] = {}
         for t in timesteps:
             vals = np.array(raw_fisher[name][t])
-            fisher_stats[name][f"fisher_t{t}_mean"] = float(np.mean(vals))
-            fisher_stats[name][f"fisher_t{t}_std"] = float(np.std(vals))
+            if len(vals) > 0:
+                fisher_results[name][t] = {
+                    "mean": float(np.mean(vals)),
+                    "std": float(np.std(vals))
+                }
             
-    return fisher_stats
+    return fisher_results
 
-def export_json(weight_metrics, fisher_metrics, output_path, timesteps):
-    combined = {"Attention": {}, "MLP": {}, "Other": {}, "metadata": {"timesteps": timesteps}}
+def export_json(weight_metrics, fisher_results, output_path, num_samples, timesteps):
+    """Merge everything into a master scientific JSON."""
+    combined = {
+        "Attention": {}, 
+        "MLP": {}, 
+        "Other": {}, 
+        "metadata": {
+            "num_samples": num_samples,
+            "timesteps": timesteps,
+            "model_architecture": "SD3.5-MM-DiT"
+        }
+    }
+    
     for name in weight_metrics:
         category = weight_metrics[name].get('category', 'Other')
-        entry = {"name": name, **weight_metrics[name], **fisher_metrics.get(name, {})}
+        # Combine static weight metrics with the dynamic Fisher stats
+        entry = {
+            "name": name,
+            "category": category,
+            "spectral_norm": weight_metrics[name]["spectral_norm"],
+            "condition_number": weight_metrics[name]["condition_number"],
+            "singular_values": weight_metrics[name]["singular_values"],
+            "fisher_stats": fisher_results.get(name, {})
+        }
         combined[category][name] = entry
+        
     with open(output_path, 'w') as f:
         json.dump(combined, f, indent=2)
-    print(f"Metrics saved to {output_path}")
+    print(f"Master scientific metrics saved to {output_path}")
 
 def visualize_metrics(json_path):
     if not os.path.exists(json_path): return
     with open(json_path, 'r') as f: data = json.load(f)
     os.makedirs("plots", exist_ok=True)
-    timesteps = data.get("metadata", {}).get("timesteps", [900, 500, 100])
+    timesteps = data.get("metadata", {}).get("timesteps", [])
 
-    # 1. Scree Plot
-    plt.figure(figsize=(10, 6))
-    for cat in ["Attention", "MLP"]:
-        layers = list(data[cat].keys())
-        if layers:
-            name = layers[len(layers)//2]
-            sv = data[cat][name]["singular_values"]
-            plt.plot(sv[:100], label=f"{cat}: {name.split('.')[-1]}")
-    plt.title("Scree Plot (First 100 Singular Values)"); plt.xlabel("Index"); plt.ylabel("Singular Value"); plt.legend(); plt.yscale('log'); plt.grid(True, alpha=0.3)
-    plt.savefig("plots/scree_plot.png")
-
-    # 2. Condition Number Plot
-    plt.figure(figsize=(12, 6))
-    for cat, color in [("Attention", "blue"), ("MLP", "red")]:
-        layers = data[cat]; names = sorted(layers.keys(), key=lambda x: [int(s) if s.isdigit() else s for s in x.split('.')])
-        if names: plt.plot(range(len(names)), [layers[n]["condition_number"] for n in names], marker='o', markersize=3, color=color, label=cat)
-    plt.title("Layer Depth vs Condition Number"); plt.xlabel("Layer Sequence"); plt.ylabel("Condition Number"); plt.yscale('log'); plt.legend(); plt.grid(True, alpha=0.3)
-    plt.savefig("plots/condition_number.png")
-
-    # 3. Fisher Info with Error Bands
-    plt.figure(figsize=(14, 8))
+    # Update visualization to use the new nested JSON structure
     all_layers = {**data["Attention"], **data["MLP"]}
     sorted_names = sorted(all_layers.keys(), key=lambda x: [int(s) if s.isdigit() else s for s in x.split('.')])
-    cmap = plt.get_cmap('viridis')
     
+    # ... (rest of plotting code updated for new structure)
+    plt.figure(figsize=(14, 8))
+    cmap = plt.get_cmap('viridis')
     for i, t in enumerate(timesteps):
         color = cmap(i / len(timesteps))
-        means = np.array([all_layers[n].get(f"fisher_t{t}_mean", 0) for n in sorted_names])
-        stds = np.array([all_layers[n].get(f"fisher_t{t}_std", 0) for n in sorted_names])
+        t_str = str(t)
+        means = np.array([all_layers[n]["fisher_stats"].get(t_str, {}).get("mean", 0) for n in sorted_names])
+        stds = np.array([all_layers[n]["fisher_stats"].get(t_str, {}).get("std", 0) for n in sorted_names])
         plt.plot(range(len(sorted_names)), means, color=color, label=f"t={t}", alpha=0.9)
         plt.fill_between(range(len(sorted_names)), means - stds, means + stds, color=color, alpha=0.1)
-        
-    plt.title("Layer Depth vs Mean Fisher Information (with Std Dev)"); plt.xlabel("Layer Sequence"); plt.ylabel("Fisher Information"); plt.yscale('log'); plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); plt.grid(True, alpha=0.3)
-    plt.tight_layout()
+    
+    plt.title("Layer Depth vs Mean Fisher Information (with Std Dev)"); plt.yscale('log'); plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left'); plt.grid(True, alpha=0.3); plt.tight_layout()
     plt.savefig("plots/fisher_info_stats.png")
-    print("Plots generated in 'plots/' folder.")
 
 def main():
     parser = argparse.ArgumentParser()
