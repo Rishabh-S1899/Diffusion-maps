@@ -397,6 +397,8 @@ def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, tem
     else: norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
     
     ts_val, layer_name = str(int(timestep[0].item())) if timestep is not None else None, getattr(self, "layer_name", None)
+    # if getattr(self, "layer_name", "") == "transformer_blocks.0":
+    #     print(f"DEBUG: Pipeline timestep is {timestep[0].item()} -> ts_val is '{ts_val}'")
     
     from .utils import cache_schedule, do_quantize_cache
     config = cache_schedule.get(ts_val, {}).get(layer_name, False)

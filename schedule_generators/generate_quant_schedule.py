@@ -1,14 +1,24 @@
 import json
 import re
+import torch
+from diffusers import StableDiffusion3Pipeline
 
 def generate_systematic_schedule():
+    print("Fetching exact timesteps from SD3.5...")
+    # Load just the scheduler to avoid massive RAM overhead
+    pipe = StableDiffusion3Pipeline.from_pretrained(
+        "stabilityai/stable-diffusion-3.5-medium", 
+        text_encoder=None, text_encoder_2=None, text_encoder_3=None, 
+        transformer=None, vae=None
+    )
+    pipe.scheduler.set_timesteps(15)
+    timesteps = [int(t.item()) for t in pipe.scheduler.timesteps]
+    print(f"Exact timesteps to be used as keys: {timesteps}")
+
     with open('layer_metrics.json', 'r') as f:
         metrics = json.load(f)
         
     schedule = {}
-    
-    # Standard 15-step inference array for SD3
-    timesteps = [1000, 928, 857, 785, 714, 642, 571, 500, 428, 357, 285, 214, 142, 71, 35]
     
     # 1. Parse max Kappas per block from the metrics
     block_data = {}
@@ -54,7 +64,6 @@ def generate_systematic_schedule():
                     
             # --- QUANTIZATION LOGIC (SVD + Fisher) ---
             if block_idx == 0:
-                # Fisher spike: Block 0 is untouchable
                 attn_bits, mlp_bits = 16, 16
                 use_cache = False # Don't cache block 0
             else:
@@ -76,7 +85,7 @@ def generate_systematic_schedule():
     with open('systematic_cache_schedule.json', 'w') as f:
         json.dump(schedule, f, indent=4)
         
-    print(f"Generated systematic_cache_schedule.json with 50% alternating caching!")
+    print(f"Generated systematic_cache_schedule.json with perfectly matched timesteps!")
 
 if __name__ == "__main__":
     generate_systematic_schedule()
