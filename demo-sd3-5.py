@@ -50,9 +50,12 @@ def main():
         
         # Clear cache state
         for _, module in pipe.transformer.named_modules():
+            # Clear Attention Cache
             if hasattr(module, 'prev_attn_output'): delattr(module, 'prev_attn_output')
             if hasattr(module, 'prev_context_attn_output'): delattr(module, 'prev_context_attn_output')
-
+            # Clear MLP Cache (NEW)
+            if hasattr(module, 'prev_mlp_output'): delattr(module, 'prev_mlp_output')
+            if hasattr(module, 'prev_context_mlp_output'): delattr(module, 'prev_context_mlp_output')
         # Run inference
         if torch.cuda.is_available(): torch.cuda.reset_peak_memory_stats()
         

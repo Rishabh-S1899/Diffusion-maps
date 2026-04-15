@@ -32,23 +32,25 @@ def manual_scaled_dot_product_attention(query, key, value, attn_mask=None, dropo
     attn_weight = torch.softmax(query @ key.transpose(-2, -1) * scale_factor + attn_bias.to(query.device), dim=-1)
     return torch.dropout(attn_weight, dropout_p, train=True) @ value, attn_weight
 
-def quantize_tensor(x):
-    """8-bit linear quantization: per-channel scaling along the last dimension"""
-    if x is None: return None
-    # x shape is (batch, tokens, channels)
-    # Calculate min/max per channel (keep dims for broadcasting)
+def quantize_tensor(x, bits=8):
+    """Adaptive linear quantization: per-channel scaling along the last dimension"""
+    if x is None: return None, None, None
+    if bits >= 16: return x, None, None # Bypass for high precision
+    
+    quant_max = (2 ** bits) - 1
     min_val = x.min(dim=1, keepdim=True)[0].min(dim=0, keepdim=True)[0]
     max_val = x.max(dim=1, keepdim=True)[0].max(dim=0, keepdim=True)[0]
     
-    scale = (max_val - min_val) / 255.0
+    scale = (max_val - min_val) / float(quant_max)
     scale[scale == 0] = 1.0
     
-    q_x = ((x - min_val) / scale).round().to(torch.uint8)
+    q_x = ((x - min_val) / scale).round().clamp(0, quant_max).to(torch.uint8)
     return q_x, min_val, scale
 
-def dequantize_tensor(q_x, min_val, scale, dtype):
-    """Convert 8-bit back to original range using per-channel scale"""
+def dequantize_tensor(q_x, min_val, scale, dtype, bits=8):
+    """Convert quantized tensor back to original range"""
     if q_x is None: return None
+    if bits >= 16: return q_x.to(dtype)
     return (q_x.to(dtype) * scale) + min_val
 
 def joint_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_states=None, attention_mask=None, height=None, timestep=None, *args, **kwargs) -> torch.FloatTensor:
@@ -339,27 +341,53 @@ def BasicTransformerBlockForward(self, hidden_states, attention_mask=None, encod
     attn_params = set(inspect.signature(self.attn1.processor.__call__).parameters.keys())
     ts_val = str(int(timestep.item())) if timestep is not None else None
     layer_name = getattr(self, "layer_name", None)
+    
     from .utils import cache_schedule, do_quantize_cache
     config = cache_schedule.get(ts_val, {}).get(layer_name, False)
-    use_cache = config if isinstance(config, bool) else config.get("cache", False)
+    if isinstance(config, dict):
+        use_cache = config.get("cache", False)
+        attn_bits = config.get("attn_bits", 8)
+        mlp_bits = config.get("mlp_bits", 8)
+    else:
+        use_cache = config
+        attn_bits = 8
+        mlp_bits = 8
+
     if use_cache and hasattr(self, "prev_attn_output"):
         if do_quantize_cache and hasattr(self, "q_info"):
-            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype)
+            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype, bits=attn_bits)
         else: attn_output = self.prev_attn_output
     else:
         attn_output = self.attn1(norm, encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None, attention_mask=attention_mask, **{k:v for k,v in cross_attention_kwargs.items() if k in attn_params})
         if ts_val and layer_name:
             if do_quantize_cache:
-                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output)
+                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output, bits=attn_bits)
                 self.q_info = (min_v, scale)
             else: self.prev_attn_output = attn_output
+            
     hidden_states = (gate_msa.unsqueeze(1) * attn_output) + hidden_states
+    
     if self.attn2 is not None:
         norm2 = self.norm2(hidden_states, timestep) if self.norm_type == "ada_norm" else self.norm2(hidden_states)
         hidden_states = self.attn2(norm2, encoder_hidden_states=encoder_hidden_states, attention_mask=encoder_attention_mask, **cross_attention_kwargs) + hidden_states
+        
     ff_norm = self.norm3(hidden_states)
     if self.norm_type == "ada_norm_zero": ff_norm = ff_norm * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-    hidden_states = (gate_mlp.unsqueeze(1) * self.ff(ff_norm)) + hidden_states
+    
+    # MLP Caching Logic
+    if use_cache and hasattr(self, "prev_mlp_output"):
+        if do_quantize_cache and hasattr(self, "q_mlp_info"):
+            mlp_output = dequantize_tensor(self.prev_mlp_output, self.q_mlp_info[0], self.q_mlp_info[1], hidden_states.dtype, bits=mlp_bits)
+        else: mlp_output = self.prev_mlp_output
+    else:
+        mlp_output = self.ff(ff_norm)
+        if ts_val and layer_name:
+            if do_quantize_cache:
+                self.prev_mlp_output, min_m, scale_m = quantize_tensor(mlp_output, bits=mlp_bits)
+                self.q_mlp_info = (min_m, scale_m)
+            else: self.prev_mlp_output = mlp_output
+
+    hidden_states = (gate_mlp.unsqueeze(1) * mlp_output) + hidden_states
     return hidden_states.squeeze(1) if hidden_states.ndim == 4 else hidden_states
 
 def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, temb, height=None, timestep=None):
@@ -367,57 +395,133 @@ def JointTransformerBlockForward(self, hidden_states, encoder_hidden_states, tem
     else: norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
     if self.context_pre_only: norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states, temb)
     else: norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
+    
     ts_val, layer_name = str(int(timestep[0].item())) if timestep is not None else None, getattr(self, "layer_name", None)
+    
     from .utils import cache_schedule, do_quantize_cache
     config = cache_schedule.get(ts_val, {}).get(layer_name, False)
-    use_cache = config if isinstance(config, bool) else config.get("cache", False)
+    if isinstance(config, dict):
+        use_cache = config.get("cache", False)
+        attn_bits = config.get("attn_bits", 8)
+        mlp_bits = config.get("mlp_bits", 8)
+    else:
+        use_cache = config
+        attn_bits = 8
+        mlp_bits = 8
+
     if use_cache and hasattr(self, "prev_attn_output"):
         if do_quantize_cache and hasattr(self, "q_info"):
-            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype)
-            context_attn_output = dequantize_tensor(self.prev_context_attn_output, self.qc_info[0], self.q_info[1], hidden_states.dtype) if not self.context_pre_only else None
+            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype, bits=attn_bits)
+            context_attn_output = dequantize_tensor(self.prev_context_attn_output, self.qc_info[0], self.qc_info[1], hidden_states.dtype, bits=attn_bits) if not self.context_pre_only else None
         else:
             attn_output, context_attn_output = self.prev_attn_output, self.prev_context_attn_output
     else:
         attn_output, context_attn_output = self.attn(norm_hidden_states, encoder_hidden_states=norm_encoder_hidden_states, timestep=timestep, height=height)
         if ts_val and layer_name:
             if do_quantize_cache:
-                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output)
+                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output, bits=attn_bits)
                 self.q_info = (min_v, scale)
                 if not self.context_pre_only:
-                    self.prev_context_attn_output, min_vc, scalec = quantize_tensor(context_attn_output)
+                    self.prev_context_attn_output, min_vc, scalec = quantize_tensor(context_attn_output, bits=attn_bits)
                     self.qc_info = (min_vc, scalec)
             else: self.prev_attn_output, self.prev_context_attn_output = attn_output, context_attn_output
+            
     hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
     if self.use_dual_attention: hidden_states = hidden_states + gate_msa2.unsqueeze(1) * self.attn2(hidden_states=norm_hidden_states2)
-    hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
+    
+    # Image Branch MLP Caching
+    if use_cache and hasattr(self, "prev_mlp_output"):
+        if do_quantize_cache and hasattr(self, "q_mlp_info"):
+            mlp_output = dequantize_tensor(self.prev_mlp_output, self.q_mlp_info[0], self.q_mlp_info[1], hidden_states.dtype, bits=mlp_bits)
+        else: mlp_output = self.prev_mlp_output
+    else:
+        mlp_output = self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
+        if ts_val and layer_name:
+            if do_quantize_cache:
+                self.prev_mlp_output, min_m, scale_m = quantize_tensor(mlp_output, bits=mlp_bits)
+                self.q_mlp_info = (min_m, scale_m)
+            else: self.prev_mlp_output = mlp_output
+    hidden_states = hidden_states + gate_mlp.unsqueeze(1) * mlp_output
+    
+    # Text Branch MLP Caching
     if not self.context_pre_only:
         encoder_hidden_states = encoder_hidden_states + c_gate_msa.unsqueeze(1) * context_attn_output
-        encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * self.ff_context(self.norm2_context(encoder_hidden_states) * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None])
+        if use_cache and hasattr(self, "prev_context_mlp_output"):
+            if do_quantize_cache and hasattr(self, "qc_mlp_info"):
+                c_mlp_output = dequantize_tensor(self.prev_context_mlp_output, self.qc_mlp_info[0], self.qc_mlp_info[1], hidden_states.dtype, bits=mlp_bits)
+            else: c_mlp_output = self.prev_context_mlp_output
+        else:
+            c_mlp_output = self.ff_context(self.norm2_context(encoder_hidden_states) * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None])
+            if ts_val and layer_name:
+                if do_quantize_cache:
+                    self.prev_context_mlp_output, min_cm, scale_cm = quantize_tensor(c_mlp_output, bits=mlp_bits)
+                    self.qc_mlp_info = (min_cm, scale_cm)
+                else: self.prev_context_mlp_output = c_mlp_output
+        encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * c_mlp_output
+        
     return encoder_hidden_states, hidden_states
 
 def FluxTransformerBlockForward(self, hidden_states, encoder_hidden_states, temb, image_rotary_emb=None, joint_attention_kwargs=None, height=None, width=None, timestep=None):
     norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
     norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(encoder_hidden_states, emb=temb)
     ts_val, layer_name = str(int(timestep[0].item())) if timestep is not None else None, getattr(self, "layer_name", None)
+    
     from .utils import cache_schedule, do_quantize_cache
     config = cache_schedule.get(ts_val, {}).get(layer_name, False)
-    use_cache = config if isinstance(config, bool) else config.get("cache", False)
+    if isinstance(config, dict):
+        use_cache = config.get("cache", False)
+        attn_bits = config.get("attn_bits", 8)
+        mlp_bits = config.get("mlp_bits", 8)
+    else:
+        use_cache = config
+        attn_bits = 8
+        mlp_bits = 8
+
     if use_cache and hasattr(self, "prev_attn_output"):
         if do_quantize_cache and hasattr(self, "q_info"):
-            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype)
-            context_attn_output = dequantize_tensor(self.prev_context_attn_output, self.qc_info[0], self.qc_info[1], hidden_states.dtype)
+            attn_output = dequantize_tensor(self.prev_attn_output, self.q_info[0], self.q_info[1], hidden_states.dtype, bits=attn_bits)
+            context_attn_output = dequantize_tensor(self.prev_context_attn_output, self.qc_info[0], self.qc_info[1], hidden_states.dtype, bits=attn_bits)
         else: attn_output, context_attn_output = self.prev_attn_output, self.prev_context_attn_output
     else:
         attn_output, context_attn_output = self.attn(norm_hidden_states, encoder_hidden_states=norm_encoder_hidden_states, image_rotary_emb=image_rotary_emb, timestep=timestep, height=height, **(joint_attention_kwargs or {}))
         if ts_val and layer_name:
             if do_quantize_cache:
-                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output)
+                self.prev_attn_output, min_v, scale = quantize_tensor(attn_output, bits=attn_bits)
                 self.q_info = (min_v, scale)
-                self.prev_context_attn_output, min_vc, scalec = quantize_tensor(context_attn_output)
+                self.prev_context_attn_output, min_vc, scalec = quantize_tensor(context_attn_output, bits=attn_bits)
                 self.qc_info = (min_vc, scalec)
             else: self.prev_attn_output, self.prev_context_attn_output = attn_output, context_attn_output
+            
     hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
-    hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
+    
+    # Flux Image MLP Caching
+    if use_cache and hasattr(self, "prev_mlp_output"):
+        if do_quantize_cache and hasattr(self, "q_mlp_info"):
+            mlp_output = dequantize_tensor(self.prev_mlp_output, self.q_mlp_info[0], self.q_mlp_info[1], hidden_states.dtype, bits=mlp_bits)
+        else: mlp_output = self.prev_mlp_output
+    else:
+        mlp_output = self.ff(self.norm2(hidden_states) * (1 + scale_mlp[:, None]) + shift_mlp[:, None])
+        if ts_val and layer_name:
+            if do_quantize_cache:
+                self.prev_mlp_output, min_m, scale_m = quantize_tensor(mlp_output, bits=mlp_bits)
+                self.q_mlp_info = (min_m, scale_m)
+            else: self.prev_mlp_output = mlp_output
+    hidden_states = hidden_states + gate_mlp.unsqueeze(1) * mlp_output
+    
     encoder_hidden_states = encoder_hidden_states + c_gate_msa.unsqueeze(1) * context_attn_output
-    encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * self.ff_context(self.norm2_context(encoder_hidden_states) * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None])
+    
+    # Flux Text MLP Caching
+    if use_cache and hasattr(self, "prev_context_mlp_output"):
+        if do_quantize_cache and hasattr(self, "qc_mlp_info"):
+            c_mlp_output = dequantize_tensor(self.prev_context_mlp_output, self.qc_mlp_info[0], self.qc_mlp_info[1], hidden_states.dtype, bits=mlp_bits)
+        else: c_mlp_output = self.prev_context_mlp_output
+    else:
+        c_mlp_output = self.ff_context(self.norm2_context(encoder_hidden_states) * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None])
+        if ts_val and layer_name:
+            if do_quantize_cache:
+                self.prev_context_mlp_output, min_cm, scale_cm = quantize_tensor(c_mlp_output, bits=mlp_bits)
+                self.qc_mlp_info = (min_cm, scale_cm)
+            else: self.prev_context_mlp_output = c_mlp_output
+    encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * c_mlp_output
+    
     return encoder_hidden_states, hidden_states
