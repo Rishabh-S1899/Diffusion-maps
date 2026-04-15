@@ -22,7 +22,6 @@ def main():
     # 1. Load prompts
     random.seed(args.seed)
     ds = load_dataset("nateraw/parti-prompts", split="train")
-    # Sort or use fixed index to be even safer across dataset versions
     all_prompts = sorted(ds['Prompt']) 
     random_prompts = random.sample(all_prompts, args.prompts)
 
@@ -48,19 +47,33 @@ def main():
         
         if args.profile: flop_counter.reset()
         
-        # Clear cache state
+        # --- UPDATE 1: Clear BOTH Attention and MLP cache states ---
         for _, module in pipe.transformer.named_modules():
-            # Clear Attention Cache
             if hasattr(module, 'prev_attn_output'): delattr(module, 'prev_attn_output')
             if hasattr(module, 'prev_context_attn_output'): delattr(module, 'prev_context_attn_output')
-            # Clear MLP Cache (NEW)
             if hasattr(module, 'prev_mlp_output'): delattr(module, 'prev_mlp_output')
             if hasattr(module, 'prev_context_mlp_output'): delattr(module, 'prev_context_mlp_output')
-        # Run inference
-        if torch.cuda.is_available(): torch.cuda.reset_peak_memory_stats()
-        
+
+        # --- UPDATE 2: Pre-compute Text Embeddings to isolate VRAM ---
         with torch.no_grad():
-            image = pipe(prompt, num_inference_steps=15, guidance_scale=4.5).images[0]
+            prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = pipe.encode_prompt(
+                prompt=prompt, prompt_2=None, prompt_3=None
+            )
+
+        # Reset peak memory AFTER text encoding, BEFORE the transformer starts
+        if torch.cuda.is_available(): 
+            torch.cuda.reset_peak_memory_stats()
+        
+        # Run inference using the pre-computed embeddings
+        with torch.no_grad():
+            image = pipe(
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                num_inference_steps=15, 
+                guidance_scale=4.5
+            ).images[0]
         
         if args.profile:
             print(f"\nFLOPs Summary for: {prompt[:50]}...")
@@ -68,7 +81,7 @@ def main():
         
         if torch.cuda.is_available():
             peak_vram = torch.cuda.max_memory_allocated() / (1024**3)
-            print(f"Peak VRAM Usage: {peak_vram:.4f} GB")
+            print(f"Transformer Peak VRAM Usage: {peak_vram:.4f} GB")
 
         image.save(os.path.join(prompt_dir, "result.png"))
         with open(os.path.join(prompt_dir, "prompt.txt"), 'w') as f: f.write(prompt)
