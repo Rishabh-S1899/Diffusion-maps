@@ -32,10 +32,52 @@ def manual_scaled_dot_product_attention(query, key, value, attn_mask=None, dropo
     attn_weight = torch.softmax(query @ key.transpose(-2, -1) * scale_factor + attn_bias.to(query.device), dim=-1)
     return torch.dropout(attn_weight, dropout_p, train=True) @ value, attn_weight
 
+def pack_4bit(q_tensor):
+    """Packs two 4-bit values (stored in uint8) into a single 8-bit uint8 tensor."""
+    # Ensure the last dimension is even (Transformer hidden dims always are)
+    assert q_tensor.shape[-1] % 2 == 0, "Last dimension must be even for 4-bit packing."
+    
+    even = q_tensor[..., 0::2]
+    odd = q_tensor[..., 1::2]
+    
+    # Shift even bits to the left by 4, and bitwise OR with odd
+    packed = (even << 4) | odd
+    return packed
+
+def unpack_4bit(packed_tensor):
+    """Unpacks a packed 8-bit tensor back into two discrete 4-bit values."""
+    even = packed_tensor >> 4
+    odd = packed_tensor & 0x0F # 0x0F is 15 (binary 00001111) to mask out the top bits
+    
+    # Interleave the even and odd elements back together
+    unpacked = torch.stack([even, odd], dim=-1).reshape(*packed_tensor.shape[:-1], -1)
+    return unpacked
+
+# def quantize_tensor(x, bits=8):
+#     """Adaptive linear quantization: per-channel scaling along the last dimension"""
+#     if x is None: return None, None, None
+#     if bits >= 16: return x, None, None # Bypass for high precision
+    
+#     quant_max = (2 ** bits) - 1
+#     min_val = x.min(dim=1, keepdim=True)[0].min(dim=0, keepdim=True)[0]
+#     max_val = x.max(dim=1, keepdim=True)[0].max(dim=0, keepdim=True)[0]
+    
+#     scale = (max_val - min_val) / float(quant_max)
+#     scale[scale == 0] = 1.0
+    
+#     q_x = ((x - min_val) / scale).round().clamp(0, quant_max).to(torch.uint8)
+#     return q_x, min_val, scale
+
+# def dequantize_tensor(q_x, min_val, scale, dtype, bits=8):
+#     """Convert quantized tensor back to original range"""
+#     if q_x is None: return None
+#     if bits >= 16: return q_x.to(dtype)
+#     return (q_x.to(dtype) * scale) + min_val
+
 def quantize_tensor(x, bits=8):
     """Adaptive linear quantization: per-channel scaling along the last dimension"""
     if x is None: return None, None, None
-    if bits >= 16: return x, None, None # Bypass for high precision
+    if bits >= 16: return x, None, None
     
     quant_max = (2 ** bits) - 1
     min_val = x.min(dim=1, keepdim=True)[0].min(dim=0, keepdim=True)[0]
@@ -45,12 +87,22 @@ def quantize_tensor(x, bits=8):
     scale[scale == 0] = 1.0
     
     q_x = ((x - min_val) / scale).round().clamp(0, quant_max).to(torch.uint8)
+    
+    # --- TRUE 4-BIT MEMORY SAVINGS ---
+    if bits == 4:
+        q_x = pack_4bit(q_x)
+        
     return q_x, min_val, scale
 
 def dequantize_tensor(q_x, min_val, scale, dtype, bits=8):
     """Convert quantized tensor back to original range"""
     if q_x is None: return None
     if bits >= 16: return q_x.to(dtype)
+    
+    # --- UNPACK 4-BIT BEFORE MATH ---
+    if bits == 4:
+        q_x = unpack_4bit(q_x)
+        
     return (q_x.to(dtype) * scale) + min_val
 
 def joint_attn_call2_0(self, attn: Attention, hidden_states, encoder_hidden_states=None, attention_mask=None, height=None, timestep=None, *args, **kwargs) -> torch.FloatTensor:
